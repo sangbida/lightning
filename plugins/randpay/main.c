@@ -6,43 +6,65 @@
 #include <plugins/libplugin.h>
 
 /* Command handler for the "hello" command */
+
+enum return_value {
+	RED,
+	YELLOW,
+	GREEN,
+};
+
+static const char *enum_to_string(enum return_value val) {
+    switch (val) {
+        case RED:
+            return "RED";
+        case YELLOW:
+            return "YELLOW";
+        case GREEN:
+            return "GREEN";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 static struct command_result *json_hello(struct command *cmd,
                                        const char *buf,
                                        const jsmntok_t *params)
 {
-    const char *name;
-    struct json_out *result;
+    uint32_t *enum_val;
+    const char *enum_str;
+    const char *message;
+    struct json_stream *response;
 
     /* Log entry to the command handler */
     plugin_log(cmd->plugin, LOG_DBG, "Hello command received, parsing parameters...");
 
     /* Parse parameters: optional "name" parameter */
     if (!param(cmd, buf, params,
-              p_opt("name", param_string, &name),
+              p_req("status_code", param_number, &enum_val),
+	       	  p_req("message", param_string, &message),
               NULL)) {
         plugin_log(cmd->plugin, LOG_BROKEN, "Parameter parsing failed!");
         return command_param_failed();
     }
 
-    /* If no name provided, use "world" */
-    if (!name) {
-        plugin_log(cmd->plugin, LOG_DBG, "No name provided, using default 'world'");
-        name = "world";
-    } else {
-        plugin_log(cmd->plugin, LOG_DBG, "Name parameter: %s", name);
-    }
+    enum_str = enum_to_string((enum return_value)*enum_val);
 
-    /* Log that we're creating the response */
-    plugin_log(cmd->plugin, LOG_DBG, "Creating json_out response object");
+    plugin_log(cmd->plugin, LOG_DBG, "Status code: %ld, Message: %s",
+               (long)enum_val, message);
 
-    /* Create a JSON object with our greeting */
-    result = json_out_obj(cmd, "greeting", tal_fmt(cmd, "Hello, %s!", name));
 
-    /* Log before returning the response */
-    plugin_log(cmd->plugin, LOG_INFORM, "Returning greeting: Hello, %s!", name);
+    response = jsonrpc_stream_success(cmd);
 
-    /* Return the response to the caller using the correct command_success function */
-    return command_success(cmd, result);
+    json_add_num(response, "status_code", *enum_val);
+    json_add_string(response, "status", enum_str);
+    json_add_string(response, "message", message);
+
+
+    plugin_log(cmd->plugin, LOG_INFORM, "Returning status %s with message: %s",
+               enum_str, message);
+
+    /* Return the response to the caller */
+    return command_success(cmd, response->jout);
 }
 
 /* Array of commands we provide */
