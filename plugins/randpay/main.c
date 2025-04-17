@@ -10,9 +10,9 @@ static struct command_result *json_hello(struct command *cmd,
                                        const char *buf,
                                        const jsmntok_t *params)
 {
-    struct json_stream *response;
     const char *name;
-    
+    struct json_out *result;
+
     /* Log entry to the command handler */
     plugin_log(cmd->plugin, LOG_DBG, "Hello command received, parsing parameters...");
 
@@ -33,24 +33,16 @@ static struct command_result *json_hello(struct command *cmd,
     }
 
     /* Log that we're creating the response */
-    plugin_log(cmd->plugin, LOG_DBG, "Creating success response...");
+    plugin_log(cmd->plugin, LOG_DBG, "Creating json_out response object");
 
-    /* Create success response */
-    response = jsonrpc_stream_success(cmd);
-    if (!response) {
-        plugin_log(cmd->plugin, LOG_BROKEN, "Failed to create JSON response stream!");
-        return command_fail(cmd, LIGHTNINGD, "Internal error: couldn't create response");
-    }
-
-    /* Add the greeting to the response */
-    plugin_log(cmd->plugin, LOG_DBG, "Adding greeting to response...");
-    json_add_string(response, "greeting", tal_fmt(cmd, "Hello, %s!", name));
+    /* Create a JSON object with our greeting */
+    result = json_out_obj(cmd, "greeting", tal_fmt(cmd, "Hello, %s!", name));
 
     /* Log before returning the response */
-    plugin_log(cmd->plugin, LOG_DBG, "Returning successful response with greeting");
+    plugin_log(cmd->plugin, LOG_INFORM, "Returning greeting: Hello, %s!", name);
 
-    /* Return the response to the caller */
-    return command_success(cmd, response->jout);
+    /* Return the response to the caller using the correct command_success function */
+    return command_success(cmd, result);
 }
 
 /* Array of commands we provide */
