@@ -2,6 +2,10 @@ PLUGIN_PAY_SRC := plugins/pay.c
 PLUGIN_PAY_HEADER :=
 PLUGIN_PAY_OBJS := $(PLUGIN_PAY_SRC:.c=.o)
 
+PLUGIN_RANDPAY_SRC := plugins/randpay/main.c
+PLUGIN_RANDPAY_HEADER :=
+PLUGIN_RANDPAY_OBJS := $(PLUGIN_RANDPAY_SRC:.c=.o)
+
 PLUGIN_AUTOCLEAN_SRC := plugins/autoclean.c
 PLUGIN_AUTOCLEAN_OBJS := $(PLUGIN_AUTOCLEAN_SRC:.c=.o)
 
@@ -80,7 +84,7 @@ PLUGIN_RECKLESSRPC_OBJS := $(PLUGIN_RECKLESSRPC_SRC:.c=.o)
 
 PLUGIN_ALL_SRC :=				\
 	$(PLUGIN_AUTOCLEAN_SRC)			\
-	$(PLUGIN_chanbackup_SRC)		\
+	$(PLUGIN_chanbackup_SRC)			\
 	$(PLUGIN_BCLI_SRC)			\
 	$(PLUGIN_COMMANDO_SRC)			\
 	$(PLUGIN_FUNDER_SRC)			\
@@ -94,7 +98,8 @@ PLUGIN_ALL_SRC :=				\
 	$(PLUGIN_PAY_SRC)			\
 	$(PLUGIN_SPENDER_SRC)			\
 	$(PLUGIN_RECOVER_SRC)			\
-	$(PLUGIN_RECKLESSRPC_SRC)
+	$(PLUGIN_RECKLESSRPC_SRC)		\
+	$(PLUGIN_RANDPAY_SRC)
 
 PLUGIN_ALL_HEADER :=				\
 	$(PLUGIN_PAY_HEADER)			\
@@ -121,7 +126,8 @@ C_PLUGINS :=					\
 	plugins/cln-renepay			\
 	plugins/cln-xpay			\
 	plugins/spenderp			\
-	plugins/cln-askrene
+	plugins/cln-askrene			\
+	plugins/randpayp
 
 ifneq ($(NO_PYTHON), 1)
 PY_PLUGINS :=					\
@@ -245,6 +251,8 @@ plugins/spenderp: bitcoin/block.o bitcoin/preimage.o bitcoin/psbt.o common/psbt_
 plugins/offers: $(PLUGIN_OFFERS_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) common/addr.o common/bolt12.o common/bolt12_merkle.o common/bolt11_json.o common/iso4217.o $(WIRE_OBJS) $(WIRE_BOLT12_OBJS) bitcoin/block.o common/channel_id.o bitcoin/preimage.o common/blindedpath.o common/bolt12_id.o common/blinding.o common/hmac.o common/json_blinded_path.o common/gossmap.o common/fp16.o $(JSMN_OBJS) common/dijkstra.o common/route.o common/gossmods_listpeerchannels.o common/onion_message.o common/sphinx.o common/onionreply.o
 
 plugins/funder: bitcoin/psbt.o common/psbt_open.o $(PLUGIN_FUNDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
+
+plugins/randpayp: $(PLUGIN_RANDPAY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
 plugins/recover:  common/gossmap.o common/sciddir_or_pubkey.o common/fp16.o $(PLUGIN_RECOVER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
