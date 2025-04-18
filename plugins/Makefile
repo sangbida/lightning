@@ -2,8 +2,11 @@ PLUGIN_PAY_SRC := plugins/pay.c
 PLUGIN_PAY_HEADER :=
 PLUGIN_PAY_OBJS := $(PLUGIN_PAY_SRC:.c=.o)
 
-PLUGIN_RANDPAY_SRC := plugins/randpay/main.c
-PLUGIN_RANDPAY_HEADER :=
+PLUGIN_RANDPAY_SRC :=				\
+	plugins/randpay/main.c			\
+	plugins/randpay/node_status.c
+PLUGIN_RANDPAY_HEADER :=			\
+	plugins/randpay/node_status.h
 PLUGIN_RANDPAY_OBJS := $(PLUGIN_RANDPAY_SRC:.c=.o)
 
 PLUGIN_AUTOCLEAN_SRC := plugins/autoclean.c
@@ -107,7 +110,8 @@ PLUGIN_ALL_HEADER :=				\
 	$(PLUGIN_FUNDER_HEADER)			\
 	$(PLUGIN_PAY_LIB_HEADER)		\
 	$(PLUGIN_OFFERS_HEADER)			\
-	$(PLUGIN_SPENDER_HEADER)
+	$(PLUGIN_SPENDER_HEADER)		\
+	$(PLUGIN_RANDPAY_HEADER)
 
 C_PLUGINS :=					\
 	plugins/autoclean			\

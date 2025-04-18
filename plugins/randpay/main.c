@@ -4,29 +4,10 @@
 #include <common/json_param.h>
 #include <common/json_stream.h>
 #include <plugins/libplugin.h>
+#include "node_status.h"
 
 
 /* Command handler for the "hello" command */
-
-enum return_value {
-    RED,
-    YELLOW,
-    GREEN,
-};
-
-static const char *enum_to_string(enum return_value val) {
-    switch (val) {
-        case RED:
-            return "RED";
-        case YELLOW:
-            return "YELLOW";
-        case GREEN:
-            return "GREEN";
-        default:
-            return "UNKNOWN";
-    }
-}
-
 static struct command_result *json_hello(struct command *cmd,
                                        const char *buf,
                                        const jsmntok_t *params)
@@ -74,6 +55,12 @@ static const struct plugin_command commands[] = {
         json_hello,        /* handler function */
         NULL, NULL,        /* not deprecated: depr_start, depr_end = NULL */
         false              /* dev_only: false */
+    },
+    {
+        "get_random_node", /* command name */
+        json_get_random_node, /* handler function */
+        NULL, NULL,        /* not deprecated: depr_start, depr_end = NULL */
+        false              /* dev_only: false */
     }
 };
 
@@ -86,6 +73,7 @@ static const char *init(struct command *cmd,
     plugin_log(cmd->plugin, LOG_INFORM, "Hello plugin initialization started");
     plugin_log(cmd->plugin, LOG_INFORM, "Plugin version: 1.0");
     plugin_log(cmd->plugin, LOG_INFORM, "Registering 'hello' command");
+    plugin_log(cmd->plugin, LOG_INFORM, "Registering 'get_random_node' command");
     plugin_log(cmd->plugin, LOG_INFORM, "Hello plugin initialization completed successfully!");
     return NULL;
 }
