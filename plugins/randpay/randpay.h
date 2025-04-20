@@ -21,14 +21,9 @@ struct command_result *json_randpay(struct command *cmd,
 
 static const struct plugin_command commands[] = {
     {
-        "randpay", /* command name */
-        json_randpay, /* handler function */
-        NULL, NULL,        /* not deprecated: depr_start, depr_end = NULL */
-        false              /* dev_only: false */
+        "randpay",
+        json_randpay,
     }
 };
-
-/* Command handler for getting a random node */
-
 
 #endif //NODE_STATUS_H

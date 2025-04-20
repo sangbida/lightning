@@ -4,9 +4,9 @@ PLUGIN_PAY_OBJS := $(PLUGIN_PAY_SRC:.c=.o)
 
 PLUGIN_RANDPAY_SRC :=				\
 	plugins/randpay/main.c			\
-	plugins/randpay/node_status.c
+	plugins/randpay/randpay.c
 PLUGIN_RANDPAY_HEADER :=			\
-	plugins/randpay/node_status.h
+	plugins/randpay/randpay.h
 PLUGIN_RANDPAY_OBJS := $(PLUGIN_RANDPAY_SRC:.c=.o)
 
 PLUGIN_AUTOCLEAN_SRC := plugins/autoclean.c

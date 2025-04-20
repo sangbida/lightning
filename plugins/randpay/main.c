@@ -4,7 +4,7 @@
 #include <common/json_param.h>
 #include <common/json_stream.h>
 #include <plugins/libplugin.h>
-#include "node_status.h"
+#include "randpay.h"
 
 
 /* Plugin initialization */
