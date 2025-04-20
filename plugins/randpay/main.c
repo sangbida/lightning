@@ -6,17 +6,6 @@
 #include <plugins/libplugin.h>
 #include "randpay.h"
 
-
-/* Plugin initialization */
-static const char *init(struct command *cmd,
-                       const char *buf UNUSED,
-                       const jsmntok_t *config UNUSED)
-{
-    /* Log a message to confirm plugin initialization */
-    plugin_log(cmd->plugin, LOG_INFORM, "Randpay plugin initialized");
-    return NULL;
-}
-
 int main(int argc, char *argv[])
 {
     /* Set up locale for proper formatting */
