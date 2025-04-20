@@ -12,6 +12,7 @@ enum return_value
 	RED,
 	YELLOW,
 	GREEN,
+	ERROR
 };
 
 const char *enum_to_string(enum return_value val);
