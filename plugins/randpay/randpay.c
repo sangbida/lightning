@@ -21,7 +21,6 @@ static struct node_id local_id;
 
 typedef struct randpay_ctx {
 	uint64_t amount_msat;
-	int riskfactor;
 	const char *node_id;
 	const char *route_json;
 	const char *error_msg;
@@ -81,7 +80,6 @@ static struct command_result *create_status_response(struct command *cmd,
 	struct json_stream *resp = jsonrpc_stream_success(cmd);
 	json_add_string(resp, "node_id", ctx->node_id ? ctx->node_id : "");
 	json_add_u64   (resp, "amount_msat", ctx->amount_msat);
-	json_add_num   (resp, "riskfactor", ctx->riskfactor);
 	json_add_string(resp, "status", enum_to_string(status));
 	if (error_msg)
 		json_add_string(resp, "error", error_msg);
@@ -366,7 +364,7 @@ static struct command_result *on_listnodes_done(
 							ctx);
 	json_add_string(req->js, "id", ctx->node_id);
 	json_add_u64   (req->js, "amount_msat", ctx->amount_msat);
-	json_add_num   (req->js, "riskfactor", ctx->riskfactor);
+	json_add_num   (req->js, "riskfactor", 10);
 	
 	plugin_log(cmd->plugin, LOG_INFORM, "Requesting route to node %s with amount %" PRIu64 " msat", 
 			  ctx->node_id, ctx->amount_msat);
@@ -380,7 +378,6 @@ struct command_result *json_randpay(struct command *cmd,
 {
 	struct out_req *req;
 	unsigned int *amount_msat;
-	unsigned int *riskfactor;
 	
 	plugin_log(cmd->plugin, LOG_INFORM, "Starting randpay command");
 	
@@ -390,7 +387,6 @@ struct command_result *json_randpay(struct command *cmd,
 	/* Parse parameters */
 	if (!param(cmd, buf, params,
 			   p_opt("amount_msat", param_number, &amount_msat),
-			   p_opt("riskfactor", param_number, &riskfactor),
 			   NULL))
 		return command_param_failed();
 	
@@ -398,12 +394,11 @@ struct command_result *json_randpay(struct command *cmd,
 	if (amount_msat && *amount_msat > 0) {
 		randpay_ctx *ctx = tal(cmd, randpay_ctx);
 		ctx->amount_msat = *amount_msat;
-		ctx->riskfactor = riskfactor ? *riskfactor : 100;
 		ctx->node_id = NULL;  // Initialize node_id to NULL
 		ctx->error_msg = NULL;  // Initialize error_msg to NULL
 		
-		plugin_log(cmd->plugin, LOG_INFORM, "Starting randpay with amount %" PRIu64 " msat and riskfactor %d", 
-				  ctx->amount_msat, ctx->riskfactor);
+		plugin_log(cmd->plugin, LOG_INFORM, "Starting randpay with amount %" PRIu64 " msat", 
+				  ctx->amount_msat);
 		
 		/* Call listnodes and wait for the response */
 		req = jsonrpc_request_start(cmd, "listnodes",
