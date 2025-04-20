@@ -191,48 +191,51 @@ static struct command_result *on_sendpay_error(
 
 // Determines payment status based on waitsendpay response
 static struct command_result *on_waitsendpay_handle(
-	struct command *cmd,
-	const char *method UNUSED,
-	const char *buf,
-	const jsmntok_t *input,
-	void *udata)
+       struct command *cmd,
+       const char *method UNUSED,
+       const char *buf,
+       const jsmntok_t *input,
+       void *udata)
 {
-	route_ctx *route_data = udata;
+       route_ctx *route_data = udata;
 
-	// Check if this is an error response
-	const jsmntok_t *error_tok = json_get_member(buf, input, "error");
-	if (error_tok) {
-		// Get the data field from the error
-		const jsmntok_t *data_tok = json_get_member(buf, error_tok, "data");
-		if (data_tok) {
-			// Extract failcode and erring_index
-			const jsmntok_t *failcode_tok = json_get_member(buf, data_tok, "failcode");
-			const jsmntok_t *erring_tok = json_get_member(buf, data_tok, "erring_index");
-			
-			if (failcode_tok && erring_tok) {
-				u64 failcode = 0;
-				u64 erring_index = 0;
-				json_to_u64(buf, failcode_tok, &failcode);
-				json_to_u64(buf, erring_tok, &erring_index);
-				
-				// GREEN: Payment details incorrect (expected with our bogus hash)
-				if (failcode == FAILCODE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS) {
-					return create_status_response(cmd, route_data->parent, GREEN, NULL);
-				}
-				
-				// RED: Error at first hop means node is likely offline/unreachable
-				if (erring_index == 0) {
-					return handle_error(cmd, route_data->parent, "Node appears to be offline or unreachable", RED);
-				}
-				
-				// YELLOW: Error somewhere in the path, but not at the target node
-				return handle_error(cmd, route_data->parent, "Payment failed in transit", YELLOW);
-			}
-		}
-	}
+       // Check if this is an error response
+       const jsmntok_t *error_tok = json_get_member(buf, input, "error");
+       if (error_tok) {
+               // Get the data field from the error
+               const jsmntok_t *data_tok = json_get_member(buf, error_tok, "data");
+               if (data_tok) {
+                       // Extract failcode and erring_index
+                       const jsmntok_t *failcode_tok = json_get_member(buf, data_tok, "failcode");
+                       const jsmntok_t *erring_tok = json_get_member(buf, data_tok, "erring_index");
 
-	// For any other case, return ERROR
-	return handle_error(cmd, route_data->parent, parse_error_message(buf, error_tok), RED);
+                       if (failcode_tok && erring_tok) {
+                               u64 failcode = 0;
+                               u64 erring_index = 0;
+                               json_to_u64(buf, failcode_tok, &failcode);
+                               json_to_u64(buf, erring_tok, &erring_index);
+
+                               // GREEN: Payment details incorrect (expected with our bogus hash)
+                               if (failcode == FAILCODE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS) {
+                                       return create_status_response(cmd, route_data->parent, GREEN, NULL);
+                               }
+
+                               // RED: Error at first hop means node is likely offline/unreachable
+                               if (erring_index == 0) {
+                                       return handle_error(cmd, route_data->parent, "Node appears to be offline or unreachable", RED);
+                               }
+
+                               // YELLOW: Error somewhere in the path, but not at the target node
+                               return handle_error(cmd, route_data->parent, "Payment failed in transit", YELLOW);
+                       }
+               }
+
+               // For any other case, return ERROR
+               return handle_error(cmd, route_data->parent, parse_error_message(buf, error_tok), RED);
+       } else {
+               // This is a success response
+               return create_status_response(cmd, route_data->parent, GREEN, NULL);
+       }
 }
 
 // Starts waitsendpay to track payment status after sendpay
