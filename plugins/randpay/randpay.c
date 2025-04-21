@@ -14,8 +14,6 @@
 #include <time.h>
 #include <inttypes.h>
 
-#define FAILCODE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS 0x400f // 16399 in decimal
-
 /* Global variable to store local node ID */
 static struct node_id local_id;
 
@@ -31,6 +29,7 @@ typedef struct randpay_ctx {
 typedef struct route_ctx {
 	randpay_ctx *parent;
 	const char *payment_hash;
+	u64 route_size;
 } route_ctx;
 
 /* Initialize random seed once at plugin load time */
@@ -84,16 +83,6 @@ static struct command_result *create_status_response(struct command *cmd,
 	if (error_msg)
 		json_add_string(resp, "error", error_msg);
 	return command_finished(cmd, resp);
-}
-
-/* Helper function to handle errors with appropriate status codes */
-static struct command_result *handle_error(struct command *cmd,
-										 randpay_ctx *ctx,
-										 const char *error_msg,
-										 enum return_value status)
-{
-	ctx->error_msg = tal_strdup(ctx, error_msg);
-	return create_status_response(cmd, ctx, status, error_msg);
 }
 
 /* Helper function to generate a payment hash (all zeros for testing) */
@@ -151,8 +140,8 @@ static const char *parse_error_message(const char *buf, const jsmntok_t *error)
 	return "Unknown error";
 }
 
-/* Handle listnodes errors */
-static struct command_result *on_listnodes_error(
+/* Handle errors for randpay_ctx */
+static struct command_result *on_randpay_error(
 	struct command *cmd,
 	const char *method UNUSED,
 	const char *buf,
@@ -160,23 +149,11 @@ static struct command_result *on_listnodes_error(
 	void *udata)
 {
 	randpay_ctx *ctx = udata;
-	return handle_error(cmd, ctx, parse_error_message(buf, error), ERROR);
+	return create_status_response(cmd, ctx, ERROR, parse_error_message(buf, error));
 }
 
-/* Handle getroute errors */
-static struct command_result *on_getroute_error(
-	struct command *cmd,
-	const char *method UNUSED,
-	const char *buf,
-	const jsmntok_t *error,
-	void *udata)
-{
-	randpay_ctx *ctx = udata;
-	return handle_error(cmd, ctx, parse_error_message(buf, error), ERROR);
-}
-
-/* Handle sendpay errors */
-static struct command_result *on_sendpay_error(
+/* Handle errors for route_ctx */
+static struct command_result *on_route_error(
 	struct command *cmd,
 	const char *method UNUSED,
 	const char *buf,
@@ -184,58 +161,104 @@ static struct command_result *on_sendpay_error(
 	void *udata)
 {
 	route_ctx *route_data = udata;
-	return handle_error(cmd, route_data->parent, parse_error_message(buf, error), ERROR);
+	return create_status_response(cmd, route_data->parent, ERROR, parse_error_message(buf, error));
 }
 
-// Determines payment status based on waitsendpay response
+
+/* Classifies failcodes into return values */
+static enum return_value determine_return_value(u64 failcode, u64 erring_index, u64 route_size) {
+	if (failcode == WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS && erring_index == route_size - 1)
+		return GREEN;
+
+	switch (failcode) {
+	// Errors that should only appear at final node
+	case WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS:
+	case WIRE_FINAL_INCORRECT_CLTV_EXPIRY:
+	case WIRE_FINAL_INCORRECT_HTLC_AMOUNT:
+		return RED;
+
+	// Unreachable node errors
+	case WIRE_TEMPORARY_NODE_FAILURE:
+	case WIRE_PERMANENT_NODE_FAILURE:
+	case WIRE_REQUIRED_NODE_FEATURE_MISSING:
+	case WIRE_UNKNOWN_NEXT_PEER:
+		return RED;
+
+	// Policy or liquidity-related errors
+	case WIRE_FEE_INSUFFICIENT:
+	case WIRE_INCORRECT_CLTV_EXPIRY:
+	case WIRE_AMOUNT_BELOW_MINIMUM:
+	case WIRE_TEMPORARY_CHANNEL_FAILURE:
+	case WIRE_PERMANENT_CHANNEL_FAILURE:
+		return YELLOW;
+
+	default:
+		return ERROR;
+	}
+}
+
+/* Handle errors for route_ctx */
 static struct command_result *on_waitsendpay_handle(
-       struct command *cmd,
-       const char *method UNUSED,
-       const char *buf,
-       const jsmntok_t *input,
-       void *udata)
+	struct command *cmd,
+	const char *method UNUSED,
+	const char *buf,
+	const jsmntok_t *input,
+	void *udata)
 {
-       route_ctx *route_data = udata;
+	enum return_value ret;
+	const jsmntok_t *failcode_tok, *erring_index_tok;
+	u64 failcode_val, erring_index_val;
+	const char *raw_msg;
+	char *full_msg;
+	struct route_ctx *ctx = udata;
 
-       // Check if this is an error response
-       const jsmntok_t *error_tok = json_get_member(buf, input, "error");
-       if (error_tok) {
-               // Get the data field from the error
-               const jsmntok_t *data_tok = json_get_member(buf, error_tok, "data");
-               if (data_tok) {
-                       // Extract failcode and erring_index
-                       const jsmntok_t *failcode_tok = json_get_member(buf, data_tok, "failcode");
-                       const jsmntok_t *erring_tok = json_get_member(buf, data_tok, "erring_index");
+	/* Check for error structure with data field */
+	const jsmntok_t *error_tok = json_get_member(buf, input, "error");
+	if (error_tok) {
+		/* Get the data field from the error */
+		const jsmntok_t *data_tok = json_get_member(buf, error_tok, "data");
+		if (data_tok) {
+			/* Extract failcode and erring_index */
+			failcode_tok = json_get_member(buf, data_tok, "failcode");
+			erring_index_tok = json_get_member(buf, data_tok, "erring_index");
 
-                       if (failcode_tok && erring_tok) {
-                               u64 failcode = 0;
-                               u64 erring_index = 0;
-                               json_to_u64(buf, failcode_tok, &failcode);
-                               json_to_u64(buf, erring_tok, &erring_index);
+			/* Get the error message if available */
+			const jsmntok_t *failcodename_tok = json_get_member(buf, data_tok, "failcodename");
+			if (failcodename_tok) {
+				raw_msg = json_strdup(tmpctx, buf, failcodename_tok);
+			} else {
+				raw_msg = "Unknown error";
+			}
 
-                               // GREEN: Payment details incorrect (expected with our bogus hash)
-                               if (failcode == FAILCODE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS) {
-                                       return create_status_response(cmd, route_data->parent, GREEN, NULL);
-                               }
+			if (!failcode_tok || !erring_index_tok)
+				return create_status_response(cmd, ctx->parent, ERROR, "Invalid error response format");
 
-                               // RED: Error at first hop means node is likely offline/unreachable
-                               if (erring_index == 0) {
-                                       return handle_error(cmd, route_data->parent, "Node appears to be offline or unreachable", RED);
-                               }
+			if (!json_to_u64(buf, failcode_tok, &failcode_val) || !json_to_u64(buf, erring_index_tok, &erring_index_val))
+				return create_status_response(cmd, ctx->parent, ERROR, "Failed to parse failcode or erring_index");
 
-                               // YELLOW: Error somewhere in the path, but not at the target node
-                               return handle_error(cmd, route_data->parent, "Payment failed in transit", YELLOW);
-                       }
-               }
+			ret = determine_return_value(failcode_val, erring_index_val, ctx->route_size);
 
-               // For any other case, return ERROR
-               return handle_error(cmd, route_data->parent, parse_error_message(buf, error_tok), RED);
-       } else {
-               // This is a success response
-               return create_status_response(cmd, route_data->parent, GREEN, NULL);
-       }
+			/* For GREEN return value (INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS), this is expected with our bogus hash */
+			if (ret == GREEN) {
+				return create_status_response(cmd, ctx->parent, GREEN, NULL);
+			}
+
+			/* For other return values, handle as errors with descriptive messages */
+			full_msg = tal_fmt(ctx, "%s (%s)",
+				(ret == RED ? "Node unreachable" :
+				 ret == YELLOW ? "Liquidity/routing issue" :
+				 "Unknown error"),
+				raw_msg);
+
+			return create_status_response(cmd, ctx->parent, ret, full_msg);
+		} else {
+			return create_status_response(cmd, ctx->parent, ERROR, "Invalid error response format");
+		}
+	} else {
+		/* No error means success */
+		return create_status_response(cmd, ctx->parent, GREEN, NULL);
+	}
 }
-
 // Starts waitsendpay to track payment status after sendpay
 static struct command_result *on_sendpay_sent(
 	struct command *cmd,
@@ -273,7 +296,7 @@ static struct command_result *on_getroute_done(
 	const jsmntok_t *route_array = json_get_member(buf, result, "route");
 	if (!route_array || route_array->type != JSMN_ARRAY || route_array->size == 0) {
 		plugin_log(cmd->plugin, LOG_INFORM, "No valid route found");
-		return handle_error(cmd, ctx, "No valid route found", RED);
+		return create_status_response(cmd, ctx, RED, "No valid route found");
 	}
 	
 	plugin_log(cmd->plugin, LOG_INFORM, "Found valid route with %d hops", route_array->size);
@@ -282,13 +305,14 @@ static struct command_result *on_getroute_done(
 	route_ctx *route_data = tal(cmd, route_ctx);
 	route_data->parent = ctx;
 	route_data->payment_hash = generate_payment_hash(route_data);
+	route_data->route_size = route_array->size;
 	plugin_log(cmd->plugin, LOG_INFORM, "Generated payment hash: %s", route_data->payment_hash);
 
 	/* Start sendpay request */
 	struct out_req *sendpay_req = jsonrpc_request_start(cmd,
 													  "sendpay",
 													  on_sendpay_sent,
-													  on_sendpay_error,
+													  on_route_error,
 													  route_data);
 	
 	/* Build route array in sendpay request */
@@ -342,7 +366,7 @@ static struct command_result *on_listnodes_done(
 	/*Check if nodes array is valid, return RED if not*/
 	if (!nodes || nodes->type != JSMN_ARRAY || nodes->size == 0) {
 		plugin_log(cmd->plugin, LOG_INFORM, "No nodes found in listnodes response");
-		return handle_error(cmd, ctx, "No nodes found in network", ERROR);
+		return create_status_response(cmd, ctx, ERROR, "No nodes found in network");
 	}
 	
 	plugin_log(cmd->plugin, LOG_INFORM, "Found %d nodes", nodes->size);
@@ -351,7 +375,7 @@ static struct command_result *on_listnodes_done(
 	ctx->node_id = select_random_node(buf, nodes, ctx);
 	if (!ctx->node_id) {
 		plugin_log(cmd->plugin, LOG_INFORM, "No valid random node selected");
-		return handle_error(cmd, ctx, "No valid random node found", ERROR);
+		return create_status_response(cmd, ctx, ERROR, "No valid random node found");
 	}
 
 	plugin_log(cmd->plugin, LOG_INFORM, "Selected node: %s", ctx->node_id);
@@ -360,7 +384,7 @@ static struct command_result *on_listnodes_done(
 	struct out_req *req = jsonrpc_request_start(cmd,
 							"getroute",
 							on_getroute_done,
-							on_getroute_error,
+							on_randpay_error,
 							ctx);
 	json_add_string(req->js, "id", ctx->node_id);
 	json_add_u64   (req->js, "amount_msat", ctx->amount_msat);
@@ -403,7 +427,7 @@ struct command_result *json_randpay(struct command *cmd,
 		/* Call listnodes and wait for the response */
 		req = jsonrpc_request_start(cmd, "listnodes",
 								   on_listnodes_done,
-								   on_listnodes_error,
+								   on_randpay_error,
 								   ctx);
 		return send_outreq(req);
 	}
@@ -411,5 +435,5 @@ struct command_result *json_randpay(struct command *cmd,
 	/* If no amount provided, just return an error */
 	plugin_log(cmd->plugin, LOG_INFORM, "No amount provided, returning error");
 	randpay_ctx *ctx = tal(cmd, randpay_ctx);
-	return handle_error(cmd, ctx, "amount_msat parameter is required", ERROR);
+	return create_status_response(cmd, ctx, ERROR, "amount_msat parameter is required");
 }
