@@ -64,7 +64,6 @@ const char *init(struct command *cmd, const char *buf UNUSED, const jsmntok_t *c
 	rpc_scan(cmd, "getinfo",
 			 take(json_out_obj(NULL, NULL, NULL)),
 			 "{id:%}", JSON_SCAN(json_to_node_id, &local_id));
-			 
 	/* Log initialization */
 	plugin_log(cmd->plugin, LOG_INFORM, "Randpay plugin initialized");
 	return NULL;
@@ -111,11 +110,9 @@ static const char *select_random_node(const char *buf, const jsmntok_t *nodes, v
 	if (valid_nodes == 0) {
 		return NULL;
 	}
-	
 	/*Get a random node from the valid nodes*/
 	size_t target_idx = rand() % valid_nodes;
 	size_t current_idx = 0;
-	
 	for (size_t i = 0; i < nodes->size; i++) {
 		const jsmntok_t *n_tok = json_get_arr(nodes, i);
 		const jsmntok_t *nid = json_get_member(buf, n_tok, "nodeid");
@@ -127,7 +124,6 @@ static const char *select_random_node(const char *buf, const jsmntok_t *nodes, v
 			current_idx++;
 		}
 	}
-	
 	return NULL;
 }
 
@@ -259,7 +255,8 @@ static struct command_result *on_waitsendpay_handle(
 		return create_status_response(cmd, ctx->parent, GREEN, NULL);
 	}
 }
-// Starts waitsendpay to track payment status after sendpay
+
+/* Starts waitsendpay to track payment status after sendpay */
 static struct command_result *on_sendpay_sent(
 	struct command *cmd,
 	const char *method UNUSED,
@@ -269,14 +266,12 @@ static struct command_result *on_sendpay_sent(
 {
 	route_ctx *route_data = udata;
 	plugin_log(cmd->plugin, LOG_INFORM, "Sendpay request sent, starting waitsendpay");
-	
 	struct out_req *req = jsonrpc_request_start(cmd,
 							"waitsendpay",
 							on_waitsendpay_handle,
 							on_waitsendpay_handle,
 							route_data);
 	json_add_string(req->js, "payment_hash", route_data->payment_hash);
-	
 	plugin_log(cmd->plugin, LOG_INFORM, "Waiting for payment result");
 	return send_outreq(req);
 }
@@ -291,16 +286,13 @@ static struct command_result *on_getroute_done(
 {
 	randpay_ctx *ctx = udata;
 	plugin_log(cmd->plugin, LOG_INFORM, "Processing route from getroute");
-	
 	/* Check if we got a valid route */
 	const jsmntok_t *route_array = json_get_member(buf, result, "route");
 	if (!route_array || route_array->type != JSMN_ARRAY || route_array->size == 0) {
 		plugin_log(cmd->plugin, LOG_INFORM, "No valid route found");
 		return create_status_response(cmd, ctx, RED, "No valid route found");
 	}
-	
 	plugin_log(cmd->plugin, LOG_INFORM, "Found valid route with %d hops", route_array->size);
-	
 	/* Create route context and generate payment hash */
 	route_ctx *route_data = tal(cmd, route_ctx);
 	route_data->parent = ctx;
@@ -314,37 +306,24 @@ static struct command_result *on_getroute_done(
 													  on_sendpay_sent,
 													  on_route_error,
 													  route_data);
-	
 	/* Build route array in sendpay request */
 	json_array_start(sendpay_req->js, "route");
-	
 	/* Copy each hop from the route */
 	for (int hop_index = 0; hop_index < route_array->size; hop_index++) {
 		const jsmntok_t *current_hop = json_get_arr(route_array, hop_index);
 		json_object_start(sendpay_req->js, NULL);
-		
 		/* Copy hop fields directly */
-		json_add_tok(sendpay_req->js, "id", 
-					json_get_member(buf, current_hop, "id"), buf);
-		json_add_tok(sendpay_req->js, "channel", 
-					json_get_member(buf, current_hop, "channel"), buf);
-		json_add_tok(sendpay_req->js, "direction", 
-					json_get_member(buf, current_hop, "direction"), buf);
-		json_add_tok(sendpay_req->js, "amount_msat", 
-					json_get_member(buf, current_hop, "amount_msat"), buf);
-		json_add_tok(sendpay_req->js, "delay", 
-					json_get_member(buf, current_hop, "delay"), buf);
-		json_add_tok(sendpay_req->js, "style", 
-					json_get_member(buf, current_hop, "style"), buf);
-		
+		json_add_tok(sendpay_req->js, "id", json_get_member(buf, current_hop, "id"), buf);
+		json_add_tok(sendpay_req->js, "channel", json_get_member(buf, current_hop, "channel"), buf);
+		json_add_tok(sendpay_req->js, "direction", json_get_member(buf, current_hop, "direction"), buf);
+		json_add_tok(sendpay_req->js, "amount_msat", json_get_member(buf, current_hop, "amount_msat"), buf);
+		json_add_tok(sendpay_req->js, "delay", json_get_member(buf, current_hop, "delay"), buf);
+		json_add_tok(sendpay_req->js, "style", json_get_member(buf, current_hop, "style"), buf);
 		json_object_end(sendpay_req->js);
 	}
-	
 	json_array_end(sendpay_req->js);
-	
 	/* Add payment hash to request */
 	json_add_string(sendpay_req->js, "payment_hash", route_data->payment_hash);
-	
 	plugin_log(cmd->plugin, LOG_INFORM, "Sending sendpay request");
 	return send_outreq(sendpay_req);
 }
@@ -359,18 +338,14 @@ static struct command_result *on_listnodes_done(
 {
 	randpay_ctx *ctx = udata;
 	plugin_log(cmd->plugin, LOG_INFORM, "Processing listnodes response");
-	
 	/*Get the nodes array*/
 	const jsmntok_t *nodes = json_get_member(buf, result, "nodes");
-
 	/*Check if nodes array is valid, return RED if not*/
 	if (!nodes || nodes->type != JSMN_ARRAY || nodes->size == 0) {
 		plugin_log(cmd->plugin, LOG_INFORM, "No nodes found in listnodes response");
 		return create_status_response(cmd, ctx, ERROR, "No nodes found in network");
 	}
-	
 	plugin_log(cmd->plugin, LOG_INFORM, "Found %d nodes", nodes->size);
-	
 	/* Select a random node */
 	ctx->node_id = select_random_node(buf, nodes, ctx);
 	if (!ctx->node_id) {
@@ -379,7 +354,6 @@ static struct command_result *on_listnodes_done(
 	}
 
 	plugin_log(cmd->plugin, LOG_INFORM, "Selected node: %s", ctx->node_id);
-
 	/*Request a route to the selected node*/
 	struct out_req *req = jsonrpc_request_start(cmd,
 							"getroute",
@@ -389,9 +363,7 @@ static struct command_result *on_listnodes_done(
 	json_add_string(req->js, "id", ctx->node_id);
 	json_add_u64   (req->js, "amount_msat", ctx->amount_msat);
 	json_add_num   (req->js, "riskfactor", 10);
-	
-	plugin_log(cmd->plugin, LOG_INFORM, "Requesting route to node %s with amount %" PRIu64 " msat", 
-			  ctx->node_id, ctx->amount_msat);
+	plugin_log(cmd->plugin, LOG_INFORM, "Requesting route to node %s with amount %" PRIu64 " msat", ctx->node_id, ctx->amount_msat);
 	return send_outreq(req);
 }
 
@@ -402,28 +374,21 @@ struct command_result *json_randpay(struct command *cmd,
 {
 	struct out_req *req;
 	unsigned int *amount_msat;
-	
 	plugin_log(cmd->plugin, LOG_INFORM, "Starting randpay command");
-	
 	/* Initialize random seed */
 	init_random_seed();
-	
 	/* Parse parameters */
 	if (!param(cmd, buf, params,
 			   p_opt("amount_msat", param_number, &amount_msat),
 			   NULL))
 		return command_param_failed();
-	
 	/* If amount_msat is provided, we'll get a route too */
 	if (amount_msat && *amount_msat > 0) {
 		randpay_ctx *ctx = tal(cmd, randpay_ctx);
 		ctx->amount_msat = *amount_msat;
 		ctx->node_id = NULL;  // Initialize node_id to NULL
 		ctx->error_msg = NULL;  // Initialize error_msg to NULL
-		
-		plugin_log(cmd->plugin, LOG_INFORM, "Starting randpay with amount %" PRIu64 " msat", 
-				  ctx->amount_msat);
-		
+		plugin_log(cmd->plugin, LOG_INFORM, "Starting randpay with amount %" PRIu64 " msat", ctx->amount_msat);
 		/* Call listnodes and wait for the response */
 		req = jsonrpc_request_start(cmd, "listnodes",
 								   on_listnodes_done,
@@ -431,9 +396,8 @@ struct command_result *json_randpay(struct command *cmd,
 								   ctx);
 		return send_outreq(req);
 	}
-	
 	/* If no amount provided, just return an error */
 	plugin_log(cmd->plugin, LOG_INFORM, "No amount provided, returning error");
 	randpay_ctx *ctx = tal(cmd, randpay_ctx);
-	return create_status_response(cmd, ctx, ERROR, "amount_msat parameter is required");
+	return create_status_response(cmd, ctx, ERROR, "A positive amount_msat parameter is required");
 }

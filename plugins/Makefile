@@ -131,7 +131,7 @@ C_PLUGINS :=					\
 	plugins/cln-xpay			\
 	plugins/spenderp			\
 	plugins/cln-askrene			\
-	plugins/randpayp
+	plugins/cln-randpay			\
 
 ifneq ($(NO_PYTHON), 1)
 PY_PLUGINS :=					\
@@ -256,7 +256,7 @@ plugins/offers: $(PLUGIN_OFFERS_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) c
 
 plugins/funder: bitcoin/psbt.o common/psbt_open.o $(PLUGIN_FUNDER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
-plugins/randpayp: $(PLUGIN_RANDPAY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
+plugins/cln-randpay: $(PLUGIN_RANDPAY_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 
 plugins/recover:  common/gossmap.o common/sciddir_or_pubkey.o common/fp16.o $(PLUGIN_RECOVER_OBJS) $(PLUGIN_LIB_OBJS) $(PLUGIN_COMMON_OBJS) $(JSMN_OBJS)
 

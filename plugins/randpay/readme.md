@@ -14,6 +14,8 @@ Testing
 Implementation 
 
 
-Out of scope
-
 Assumptions and Tradeoffs 
+
+- We're not doing a very thorough input validation, we do test for 
+unusual inputs but we're okay to surface these up with their error code since the prc system seems to performing input validations for non integer, 
+including negative integer, inputs.
