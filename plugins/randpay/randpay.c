@@ -165,7 +165,7 @@ static enum return_value determine_return_value(struct command *cmd, u64 failcod
 	plugin_log(cmd->plugin, LOG_INFORM, "determine_return_value called with failcode: %llu, erring_index: %llu, route_size: %llu",
 		failcode, erring_index, route_size);
 
-	if (failcode == WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS && erring_index == route_size - 1) {
+	if (failcode == WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS && erring_index == route_size) {
 		plugin_log(cmd->plugin, LOG_INFORM, "Returning GREEN (payment details incorrect at final node)");
 		return GREEN;
 	}

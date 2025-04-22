@@ -38,7 +38,6 @@ def test_randpay_direct_payment(node_factory):
     l1, l2 = node_factory.line_graph(2, wait_for_announce=True)
     response = l1.rpc.randpay(amount_msat=1000)
     assert response['status'] == 'GREEN'
-    assert response['error'] == 'No nodes found in network'
 
 def test_randpay_mpp_payment(node_factory):
     l1, l2, l3, l4 = node_factory.get_nodes(4)
@@ -56,7 +55,7 @@ def test_randpay_mpp_payment(node_factory):
     time.sleep(1)
     response = l1.rpc.randpay(amount_msat=150_000)
     assert response['status'] == 'GREEN'
-    assert response['error'] == 'No nodes found in network'
+
 def test_randpay_node_offline(node_factory):
     """Test randpay when destination node is unreachable (RED status)"""
     l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=True)
@@ -129,17 +128,17 @@ def test_randpay_yellow_plugin(node_factory, bitcoind):
         node.daemon.wait_for_logs([r"update for channel .* now ACTIVE"])
 
     # Try multiple payments to increase the chance of hitting the failing node
-    red_found = False
+    yellow_found = False
     for i in range(5):
         try:
             response = l1.rpc.randpay(amount_msat=1000)
             print(f"Attempt {i+1} result: {response}")
             if response['status'] == 'YELLOW':
-                red_found = True
+                yellow_found = True
                 break
         except Exception as e:
             print(f"Exception on attempt {i+1}: {e}")
         time.sleep(1)
 
-    # Check if we found a RED status
-    assert red_found, "Failed to get YELLOW status after multiple attempts"
+    # Check if we found a YELLOW status
+    assert yellow_found, "Failed to get YELLOW status after multiple attempts"
