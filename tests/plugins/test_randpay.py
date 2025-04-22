@@ -4,6 +4,7 @@ import json
 from pyln.testing.fixtures import *  # noqa: F403, F401
 from pyln.client import RpcError
 import time
+import random
 
 def test_randpay_missing_amount(node_factory):
     l1 = node_factory.get_node()
@@ -18,16 +19,6 @@ def test_randpay_missing_amount(node_factory):
     assert 'error' in response
     assert response['error'] == 'A positive amount_msat parameter is required'
 
-# def test_randpay_parameter_validation(node_factory):
-#     l1 = node_factory.get_node()
-#
-#     response = l1.rpc.randpay()
-#     assert response['status'] == 'ERROR'
-#     assert 'amount_msat parameter is required' in response['error']
-#
-#     response = l1.rpc.randpay(amount_msat=-1000)
-#     assert response['status'] == 'ERROR'
-#     assert 'amount_msat must be positive' in response['error']
 
 def test_randpay_no_nodes(node_factory):
     l1 = node_factory.get_node()
@@ -47,6 +38,7 @@ def test_randpay_direct_payment(node_factory):
     l1, l2 = node_factory.line_graph(2, wait_for_announce=True)
     response = l1.rpc.randpay(amount_msat=1000)
     assert response['status'] == 'GREEN'
+    assert response['error'] == 'No nodes found in network'
 
 def test_randpay_mpp_payment(node_factory):
     l1, l2, l3, l4 = node_factory.get_nodes(4)
@@ -64,18 +56,90 @@ def test_randpay_mpp_payment(node_factory):
     time.sleep(1)
     response = l1.rpc.randpay(amount_msat=150_000)
     assert response['status'] == 'GREEN'
+    assert response['error'] == 'No nodes found in network'
+def test_randpay_node_offline(node_factory):
+    """Test randpay when destination node is unreachable (RED status)"""
+    l1, l2, l3 = node_factory.line_graph(3, wait_for_announce=True)
+    
+    # Disconnect l2 from l3 to simulate unreachable node
+    l2.stop()
+    
+    time.sleep(1)
+    response = l1.rpc.randpay(amount_msat=1000)
+    
+    # Should return RED for unreachable node
+    assert response['status'] == 'RED'
+    assert response['error'] == 'Could not find a route'
+def test_randpay_red_with_failure_plugin(node_factory, bitcoind):
+    """Test RED status by forcing WIRE_TEMPORARY_NODE_FAILURE using the fail_htlcs plugin"""
 
-def test_randpay_insufficient_liquidity(node_factory):
-    l1, l2, l3 = node_factory.line_graph(3, fundamount=100_000, wait_for_announce=True)
+    # Create a three-node network with the failure plugin on the middle node
+    plugin_path = os.path.join(os.getcwd(), 'tests/plugins/fail_htlcs.py')
 
-    # Drain liquidity from l2->l3 by sending from l3 to l2
-    l3.pay(l2, 80_000)
+    # Verify the plugin file exists
+    assert os.path.exists(plugin_path), f"Plugin file not found: {plugin_path}"
 
-    # Verify payment succeeded (l2 received the funds)
-    assert l2.rpc.listpeers(l3.info['id'])['peers'][0]['channels'][0]['to_us_msat'] > 80_000 * 1000
+    # Create the network with the plugin loaded on the middle node
+    l1, l2, l3 = node_factory.line_graph(3,
+                                         opts=[{},
+                                               {'plugin': plugin_path},
+                                               {}],
+                                         wait_for_announce=True)
 
-    # Try to send a payment requiring more liquidity than available
-    response = l1.rpc.randpay(amount_msat=100_000)
+    # Ensure channels are active
+    bitcoind.generate_block(6)
+    for node in [l1, l2, l3]:
+        node.daemon.wait_for_logs([r"update for channel .* now ACTIVE"])
 
-    # Should return YELLOW for liquidity issues
-    assert response['status'] == 'YELLOW'
+    # Try multiple payments to increase the chance of hitting the failing node
+    red_found = False
+    for i in range(5):
+        try:
+            response = l1.rpc.randpay(amount_msat=1000)
+            print(f"Attempt {i+1} result: {response}")
+            if response['status'] == 'RED':
+                red_found = True
+                break
+        except Exception as e:
+            print(f"Exception on attempt {i+1}: {e}")
+        time.sleep(1)
+
+    # Check if we found a RED status
+    assert red_found, "Failed to get RED status after multiple attempts"
+
+def test_randpay_yellow_plugin(node_factory, bitcoind):
+    """Test RED status by forcing WIRE_TEMPORARY_NODE_FAILURE using the fail_htlcs plugin"""
+
+    # Create a three-node network with the failure plugin on the middle node
+    plugin_path = os.path.join(os.getcwd(), 'tests/plugins/htlc_failure.py')
+
+    # Verify the plugin file exists
+    assert os.path.exists(plugin_path), f"Plugin file not found: {plugin_path}"
+
+    # Create the network with the plugin loaded on the middle node
+    l1, l2, l3 = node_factory.line_graph(3,
+                                         opts=[{},
+                                               {'plugin': plugin_path},
+                                               {}],
+                                         wait_for_announce=True)
+
+    # Ensure channels are active
+    bitcoind.generate_block(6)
+    for node in [l1, l2, l3]:
+        node.daemon.wait_for_logs([r"update for channel .* now ACTIVE"])
+
+    # Try multiple payments to increase the chance of hitting the failing node
+    red_found = False
+    for i in range(5):
+        try:
+            response = l1.rpc.randpay(amount_msat=1000)
+            print(f"Attempt {i+1} result: {response}")
+            if response['status'] == 'YELLOW':
+                red_found = True
+                break
+        except Exception as e:
+            print(f"Exception on attempt {i+1}: {e}")
+        time.sleep(1)
+
+    # Check if we found a RED status
+    assert red_found, "Failed to get YELLOW status after multiple attempts"

@@ -145,7 +145,7 @@ static struct command_result *on_randpay_error(
 	void *udata)
 {
 	randpay_ctx *ctx = udata;
-	return create_status_response(cmd, ctx, ERROR, parse_error_message(buf, error));
+	return create_status_response(cmd, ctx, RED, parse_error_message(buf, error));
 }
 
 /* Handle errors for route_ctx */
@@ -157,20 +157,24 @@ static struct command_result *on_route_error(
 	void *udata)
 {
 	route_ctx *route_data = udata;
-	return create_status_response(cmd, route_data->parent, ERROR, parse_error_message(buf, error));
+	return create_status_response(cmd, route_data->parent, RED, parse_error_message(buf, error));
 }
 
-
 /* Classifies failcodes into return values */
-static enum return_value determine_return_value(u64 failcode, u64 erring_index, u64 route_size) {
-	if (failcode == WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS && erring_index == route_size - 1)
-		return GREEN;
+static enum return_value determine_return_value(struct command *cmd, u64 failcode, u64 erring_index, u64 route_size) {
+	plugin_log(cmd->plugin, LOG_INFORM, "determine_return_value called with failcode: %llu, erring_index: %llu, route_size: %llu",
+		failcode, erring_index, route_size);
 
+	if (failcode == WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS && erring_index == route_size - 1) {
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning GREEN (payment details incorrect at final node)");
+		return GREEN;
+	}
 	switch (failcode) {
 	// Errors that should only appear at final node
 	case WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS:
 	case WIRE_FINAL_INCORRECT_CLTV_EXPIRY:
 	case WIRE_FINAL_INCORRECT_HTLC_AMOUNT:
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning RED (final node error)");
 		return RED;
 
 	// Unreachable node errors
@@ -178,6 +182,7 @@ static enum return_value determine_return_value(u64 failcode, u64 erring_index, 
 	case WIRE_PERMANENT_NODE_FAILURE:
 	case WIRE_REQUIRED_NODE_FEATURE_MISSING:
 	case WIRE_UNKNOWN_NEXT_PEER:
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning RED (node unreachable)");
 		return RED;
 
 	// Policy or liquidity-related errors
@@ -186,10 +191,12 @@ static enum return_value determine_return_value(u64 failcode, u64 erring_index, 
 	case WIRE_AMOUNT_BELOW_MINIMUM:
 	case WIRE_TEMPORARY_CHANNEL_FAILURE:
 	case WIRE_PERMANENT_CHANNEL_FAILURE:
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning YELLOW (liquidity/routing issue)");
 		return YELLOW;
 
 	default:
-		return ERROR;
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning ERROR (unknown failcode: %llu)", failcode);
+		return RED;
 	}
 }
 
@@ -201,58 +208,77 @@ static struct command_result *on_waitsendpay_handle(
 	const jsmntok_t *input,
 	void *udata)
 {
-	enum return_value ret;
-	const jsmntok_t *failcode_tok, *erring_index_tok;
-	u64 failcode_val, erring_index_val;
-	const char *raw_msg;
-	char *full_msg;
 	struct route_ctx *ctx = udata;
+	enum return_value ret;
+	u64 failcode = 0, erring_index = 0;
+	const char *failcodename = NULL;
 
-	/* Check for error structure with data field */
-	const jsmntok_t *error_tok = json_get_member(buf, input, "error");
-	if (error_tok) {
-		/* Get the data field from the error */
-		const jsmntok_t *data_tok = json_get_member(buf, error_tok, "data");
-		if (data_tok) {
-			/* Extract failcode and erring_index */
-			failcode_tok = json_get_member(buf, data_tok, "failcode");
-			erring_index_tok = json_get_member(buf, data_tok, "erring_index");
+	plugin_log(cmd->plugin, LOG_INFORM, "on_waitsendpay_handle called with input: %.*s",
+		input->end - input->start, buf + input->start);
 
-			/* Get the error message if available */
-			const jsmntok_t *failcodename_tok = json_get_member(buf, data_tok, "failcodename");
-			if (failcodename_tok) {
-				raw_msg = json_strdup(tmpctx, buf, failcodename_tok);
-			} else {
-				raw_msg = "Unknown error";
-			}
+	/* Use json_get_member to find the tokens directly */
+	const jsmntok_t *data_tok = json_get_member(buf, input, "data");
+	const jsmntok_t *failcode_tok, *erring_index_tok, *failcodename_tok;
 
-			if (!failcode_tok || !erring_index_tok)
-				return create_status_response(cmd, ctx->parent, ERROR, "Invalid error response format");
+	/* If no data at top level, look for error.data structure */
+	if (!data_tok) {
+		const jsmntok_t *error_tok = json_get_member(buf, input, "error");
+		if (error_tok)
+			data_tok = json_get_member(buf, error_tok, "data");
+	}
 
-			if (!json_to_u64(buf, failcode_tok, &failcode_val) || !json_to_u64(buf, erring_index_tok, &erring_index_val))
-				return create_status_response(cmd, ctx->parent, ERROR, "Failed to parse failcode or erring_index");
-
-			ret = determine_return_value(failcode_val, erring_index_val, ctx->route_size);
-
-			/* For GREEN return value (INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS), this is expected with our bogus hash */
-			if (ret == GREEN) {
-				return create_status_response(cmd, ctx->parent, GREEN, NULL);
-			}
-
-			/* For other return values, handle as errors with descriptive messages */
-			full_msg = tal_fmt(ctx, "%s (%s)",
-				(ret == RED ? "Node unreachable" :
-				 ret == YELLOW ? "Liquidity/routing issue" :
-				 "Unknown error"),
-				raw_msg);
-
-			return create_status_response(cmd, ctx->parent, ret, full_msg);
-		} else {
-			return create_status_response(cmd, ctx->parent, ERROR, "Invalid error response format");
-		}
+	/* If we found data, get values from there, otherwise try from the root */
+	if (data_tok) {
+		failcode_tok = json_get_member(buf, data_tok, "failcode");
+		erring_index_tok = json_get_member(buf, data_tok, "erring_index");
+		failcodename_tok = json_get_member(buf, data_tok, "failcodename");
 	} else {
-		/* No error means success */
+		failcode_tok = json_get_member(buf, input, "failcode");
+		erring_index_tok = json_get_member(buf, input, "erring_index");
+		failcodename_tok = json_get_member(buf, input, "failcodename");
+	}
+
+	/* Check if we found the required fields */
+	if (!failcode_tok || !erring_index_tok) {
+		plugin_log(cmd->plugin, LOG_INFORM, "Couldn't find failcode or erring_index in the response");
+		return create_status_response(cmd, ctx->parent, RED, "Missing failcode or erring_index in response");
+	}
+
+	/* Extract the values using tal's json functions */
+	if (!json_to_u64(buf, failcode_tok, &failcode) ||
+	    !json_to_u64(buf, erring_index_tok, &erring_index)) {
+		plugin_log(cmd->plugin, LOG_INFORM, "Failed to parse failcode or erring_index values");
+		return create_status_response(cmd, ctx->parent, RED, "Invalid failcode or erring_index format");
+	}
+
+	/* Extract failcodename if available */
+	if (failcodename_tok)
+		failcodename = json_strdup(tmpctx, buf, failcodename_tok);
+
+	plugin_log(cmd->plugin, LOG_INFORM, "Extracted failcode: %llu, erring_index: %llu, failcodename: %s",
+		failcode, erring_index, failcodename ? failcodename : "N/A");
+
+	/* Determine the return value based on failcode and erring_index */
+	ret = determine_return_value(cmd, failcode, erring_index, ctx->route_size);
+
+	/* Return appropriate response based on the determined return value */
+	switch (ret) {
+	case GREEN:
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning GREEN status");
 		return create_status_response(cmd, ctx->parent, GREEN, NULL);
+
+	case YELLOW:
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning YELLOW status");
+		return create_status_response(cmd, ctx->parent, YELLOW, NULL);
+
+	case RED:
+		plugin_log(cmd->plugin, LOG_INFORM, "Returning RED status");
+		return create_status_response(cmd, ctx->parent, RED, NULL);
+
+	case ERROR:
+	default:
+		return create_status_response(cmd, ctx->parent, ret,
+			failcodename ? tal_fmt(tmpctx, "Error: %s", failcodename) : "Unknown error");
 	}
 }
 
