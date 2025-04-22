@@ -7,6 +7,7 @@ import time
 import random
 
 def test_randpay_missing_amount(node_factory):
+    """Test randpay with a missing amount"""
     l1 = node_factory.get_node()
 
     plugins = l1.rpc.plugin_list()
@@ -21,12 +22,14 @@ def test_randpay_missing_amount(node_factory):
 
 
 def test_randpay_no_nodes(node_factory):
+    """Test randpay with no nodes in the network"""
     l1 = node_factory.get_node()
     response = l1.rpc.randpay(amount_msat=1000)
     assert response['status'] == 'ERROR'
     assert 'No nodes found' in response['error'] or 'No valid random node' in response['error']
 
 def test_randpay_no_route(node_factory):
+    """Test randpay when no route is available between nodes"""
     l1, l2 = node_factory.get_nodes(2)
 
     # Call randpay - should result in RED because no route available
@@ -35,11 +38,13 @@ def test_randpay_no_route(node_factory):
     assert response['error'] == 'No nodes found in network'
 
 def test_randpay_direct_payment(node_factory):
+    """Test randpay with a  successful payment between two nodes"""
     l1, l2 = node_factory.line_graph(2, wait_for_announce=True)
     response = l1.rpc.randpay(amount_msat=1000)
     assert response['status'] == 'GREEN'
 
 def test_randpay_mpp_payment(node_factory):
+    """Test randpay with a  successful payment between multiple nodes"""
     l1, l2, l3, l4 = node_factory.get_nodes(4)
 
     l1.connect(l2)
@@ -72,7 +77,7 @@ def test_randpay_node_offline(node_factory):
 def test_randpay_red_with_failure_plugin(node_factory, bitcoind):
     """Test RED status by forcing WIRE_TEMPORARY_NODE_FAILURE using the fail_htlcs plugin"""
 
-    # Create a three-node network with the failure plugin on the middle node
+
     plugin_path = os.path.join(os.getcwd(), 'tests/plugins/fail_htlcs.py')
 
     # Verify the plugin file exists
@@ -95,19 +100,17 @@ def test_randpay_red_with_failure_plugin(node_factory, bitcoind):
     for i in range(5):
         try:
             response = l1.rpc.randpay(amount_msat=1000)
-            print(f"Attempt {i+1} result: {response}")
             if response['status'] == 'RED':
                 red_found = True
                 break
         except Exception as e:
-            print(f"Exception on attempt {i+1}: {e}")
+            pass
         time.sleep(1)
 
-    # Check if we found a RED status
     assert red_found, "Failed to get RED status after multiple attempts"
 
 def test_randpay_yellow_plugin(node_factory, bitcoind):
-    """Test RED status by forcing WIRE_TEMPORARY_NODE_FAILURE using the fail_htlcs plugin"""
+    """Test YELLOW status by forcing WIRE_TEMPORARY_CHANNEL_FAILURE using the htlc_failure plugin"""
 
     # Create a three-node network with the failure plugin on the middle node
     plugin_path = os.path.join(os.getcwd(), 'tests/plugins/htlc_failure.py')
@@ -132,13 +135,13 @@ def test_randpay_yellow_plugin(node_factory, bitcoind):
     for i in range(5):
         try:
             response = l1.rpc.randpay(amount_msat=1000)
-            print(f"Attempt {i+1} result: {response}")
             if response['status'] == 'YELLOW':
                 yellow_found = True
                 break
         except Exception as e:
-            print(f"Exception on attempt {i+1}: {e}")
+            pass
         time.sleep(1)
 
     # Check if we found a YELLOW status
     assert yellow_found, "Failed to get YELLOW status after multiple attempts"
+

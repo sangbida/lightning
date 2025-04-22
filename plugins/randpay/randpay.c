@@ -99,12 +99,14 @@ static const char *select_random_node(const char *buf,
 {
 	/* Count valid nodes (excluding our own) */
 	size_t valid_nodes = 0;
-	for (size_t i = 0; i < nodes->size; i++) {
+	for (size_t i = 0; i < nodes->size; i++)
+	{
 		const jsmntok_t *n_tok = json_get_arr(nodes, i);
 		const jsmntok_t *nid = json_get_member(buf, n_tok, "nodeid");
 		struct node_id nodeid;
 		if (json_to_node_id(buf, nid, &nodeid) &&
-		    !node_id_eq(&nodeid, &local_id)) {
+		    !node_id_eq(&nodeid, &local_id))
+		{
 			valid_nodes++;
 		}
 	}
@@ -115,15 +117,20 @@ static const char *select_random_node(const char *buf,
 	/* Get a random node from the valid nodes */
 	size_t target_idx = rand() % valid_nodes;
 	size_t current_idx = 0;
-	for (size_t i = 0; i < nodes->size; i++) {
+	for (size_t i = 0; i < nodes->size; i++)
+	{
 		const jsmntok_t *n_tok = json_get_arr(nodes, i);
 		const jsmntok_t *nid = json_get_member(buf, n_tok, "nodeid");
 		struct node_id nodeid;
 		if (json_to_node_id(buf, nid, &nodeid) &&
-		    !node_id_eq(&nodeid, &local_id)) {
-			if (current_idx == target_idx) {
+		    !node_id_eq(&nodeid, &local_id))
+		{
+			if (current_idx == target_idx)
+			{
 				return tal_strdup(ctx,
-						  json_strdup(tmpctx, buf, nid));
+						  json_strdup(tmpctx,
+							      buf,
+							      nid));
 			}
 			current_idx++;
 		}
@@ -172,18 +179,20 @@ static enum return_value determine_return_value(struct command *cmd,
 						u64 erring_index,
 						u64 route_size)
 {
-	plugin_log(cmd->plugin,
-		   LOG_INFORM,
-		   "determine_return_value called with failcode: %llu, erring_index: %llu, route_size: %llu",
-		failcode, erring_index, route_size);
-
+	/* This check identifies a successful probe to the destination node.
+	 * We expect this to fail with WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS
+	 * because we're using a bogus payment hash. When erring_index equals
+	 * route_size, it confirms the error occurred at the final hop.
+	 */
 	if (failcode == WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS &&
-	    erring_index == route_size) {
+	    erring_index == route_size)
+	{
 		plugin_log(cmd->plugin, LOG_INFORM,
 			   "Returning GREEN (payment details incorrect at final node)");
 		return GREEN;
 	}
-	switch (failcode) {
+	switch (failcode)
+	{
 	/* Errors that should only appear at final node */
 	case WIRE_INCORRECT_OR_UNKNOWN_PAYMENT_DETAILS:
 	case WIRE_FINAL_INCORRECT_CLTV_EXPIRY:
@@ -245,7 +254,10 @@ static struct command_result *on_waitsendpay_handle(
 							     input,
 							     "error");
 		if (error_tok)
-			data_tok = json_get_member(buf, error_tok, "data");    
+		{
+			data_tok = json_get_member(buf, error_tok, "data");
+		}
+
 	}
 	/* Set the token we'll search in */
 	search_tok = data_tok ? data_tok : input;
@@ -259,7 +271,6 @@ static struct command_result *on_waitsendpay_handle(
 		return create_status_response(cmd, ctx->parent, RED, "Missing failcode or erring_index in response");
 	}
 
-	/* Extract the values using tal's json functions */
 	if (!json_to_u64(buf, failcode_tok, &failcode) ||
 	    !json_to_u64(buf, erring_index_tok, &erring_index)) {
 		plugin_log(cmd->plugin, LOG_INFORM, "Failed to parse failcode or erring_index values");
@@ -279,7 +290,6 @@ static struct command_result *on_waitsendpay_handle(
 				     erring_index,
 				     ctx->route_size);
 
-	/* Return appropriate response based on the determined return value */
 	switch (ret) {
 	case GREEN:
 		plugin_log(cmd->plugin, LOG_INFORM, "Returning GREEN status");
@@ -335,13 +345,12 @@ static struct command_result *on_getroute_done(
 	void *udata)
 {
 	randpay_ctx *ctx = udata;
-	plugin_log(cmd->plugin, LOG_INFORM, "Processing route from getroute");
 	/* Check if we got a valid route */
 	const jsmntok_t *route_array = json_get_member(buf, result, "route");
 	if (!route_array ||
 	    route_array->type != JSMN_ARRAY ||
 	    route_array->size == 0) {
-		plugin_log(cmd->plugin, LOG_INFORM, "No valid route found");
+		plugin_log(cmd->plugin, LOG_DBG, "No valid route found");
 		return create_status_response(cmd,
 					      ctx,
 					      RED,
@@ -356,10 +365,6 @@ static struct command_result *on_getroute_done(
 	route_data->parent = ctx;
 	route_data->payment_hash = generate_payment_hash(route_data);
 	route_data->route_size = route_array->size;
-	plugin_log(cmd->plugin,
-		   LOG_INFORM,
-		   "Generated payment hash: %s",
-		   route_data->payment_hash);
 
 	/* Start sendpay request */
 	struct out_req *sendpay_req = jsonrpc_request_start(cmd,
