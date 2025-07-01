@@ -32,6 +32,8 @@
 #define ERROR_KEYDERIV 5
 #define ERROR_LANG_NOT_SUPPORTED 6
 #define ERROR_TERM 7
+#define HSM_SECRET_BINARY_SIZE 32
+#define HSM_SECRET_ENCRYPTED_SIZE 73
 
 static void show_usage(const char *progname)
 {
@@ -154,22 +156,47 @@ static void get_channel_seed(struct secret *channel_seed, struct node_id *peer_i
 	            info, strlen(info));
 }
 
+/* Check if the secret is a valid mnemonic */
+static int is_mnemonic_secret(const char *path)
+{
+	char *content = grab_file(tmpctx, path);
+	if (!content)
+		return false;
+	size_t len = strlen(content);
+
+	//Strip trailing newline
+	if (len > 0 && content[len - 1] == '\n')
+		content[len - 1] = '\0';
+
+	//Check if the content is a valid mnemonic
+	struct words *words;
+	//TODO: Can this be hard coded?
+	bip39_get_wordlist("en", &words);
+	if (bip39_mnemonic_validate(words, content) != 0) {
+		errx(ERROR_USAGE, "Invalid mnemonic: \"%s\"", content);
+	}
+	return true;
+}
+
 /* We detect an encrypted hsm_secret as a hsm_secret which is 73-bytes long. */
 static bool hsm_secret_is_encrypted(const char *hsm_secret_path)
 {
         switch (is_hsm_secret_encrypted(hsm_secret_path)) {
-		case -1:
+		case -1
 			err(EXITCODE_ERROR_HSM_FILE, "Cannot open '%s'", hsm_secret_path);
 		case 1:
 			return true;
 	        case 0: {
 			/* Extra sanity check on HSM file! */
 			struct stat st;
-			stat(hsm_secret_path, &st);
-			if (st.st_size != 32)
+			stat(hsm_secret_path, &st);		
+			if (st.st_size != 32) {
+				if (is_mnemonic_secret(hsm_secret_path))
+					return false;
 				errx(EXITCODE_ERROR_HSM_FILE,
-				     "Invalid hsm_secret '%s' (neither plaintext "
-				     "nor encrypted).", hsm_secret_path);
+					"Invalid hsm_secret '%s' (neither plaintext, mnemonic, nor encrypted).",
+					hsm_secret_path);
+			}
 			return false;
 		}
 	}
