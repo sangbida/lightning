@@ -35,6 +35,10 @@
 #define HSM_SECRET_BINARY_SIZE 32
 #define HSM_SECRET_ENCRYPTED_SIZE 73
 
+/* TODO: Fix up these forward declarations */
+static int is_mnemonic_secret(const char *path);
+static void load_mnemonic_secret(struct secret *hsm_secret, const char *path);
+
 static void show_usage(const char *progname)
 {
 	printf("%s <method> [arguments]\n", progname);
@@ -96,7 +100,11 @@ static void grab_hsm_file(const char *hsm_secret_path,
 static void get_unencrypted_hsm_secret(struct secret *hsm_secret,
 				       const char *hsm_secret_path)
 {
-	grab_hsm_file(hsm_secret_path, hsm_secret, sizeof(*hsm_secret));
+	if (is_mnemonic_secret(hsm_secret_path)) {
+		load_mnemonic_secret(hsm_secret, hsm_secret_path);
+	} else {
+		grab_hsm_file(hsm_secret_path, hsm_secret, sizeof(*hsm_secret));
+	}
 }
 
 /* Derive the encryption key from the password provided, and try to decrypt
@@ -156,33 +164,50 @@ static void get_channel_seed(struct secret *channel_seed, struct node_id *peer_i
 	            info, strlen(info));
 }
 
+static char *read_and_validate_mnemonic_file(const char *path)
+{
+	char *mnemonic = grab_file(tmpctx, path);
+	if (!mnemonic)
+		return NULL;
+
+	size_t len = strlen(mnemonic);
+	if (len > 0 && mnemonic[len - 1] == '\n')
+		mnemonic[len - 1] = '\0';
+
+	struct words *words;
+	if (bip39_get_wordlist("en", &words) != WALLY_OK)
+		return NULL;
+
+	if (bip39_mnemonic_validate(words, mnemonic) != 0)
+		return NULL;
+
+	return mnemonic;
+}
+
+
 /* Check if the secret is a valid mnemonic */
 static int is_mnemonic_secret(const char *path)
 {
-	char *content = grab_file(tmpctx, path);
-	if (!content)
-		return false;
-	size_t len = strlen(content);
+	return read_and_validate_mnemonic_file(path) != NULL;
+}
 
-	//Strip trailing newline
-	if (len > 0 && content[len - 1] == '\n')
-		content[len - 1] = '\0';
+static void load_mnemonic_secret(struct secret *hsm_secret,
+                                 const char *path)
+{
+	char *mnemonic = read_and_validate_mnemonic_file(path);
+	if (!mnemonic)
+		errx(EXITCODE_ERROR_HSM_FILE, "Invalid mnemonic in hsm_secret");
 
-	//Check if the content is a valid mnemonic
-	struct words *words;
-	//TODO: Can this be hard coded?
-	bip39_get_wordlist("en", &words);
-	if (bip39_mnemonic_validate(words, content) != 0) {
-		errx(ERROR_USAGE, "Invalid mnemonic: \"%s\"", content);
-	}
-	return true;
+	//TODO: Do we need to pass a passphrase?
+	if (bip39_mnemonic_to_seed(mnemonic, "", hsm_secret->data, sizeof(hsm_secret->data), NULL) != WALLY_OK)
+		errx(EXITCODE_ERROR_HSM_FILE, "Failed to derive seed from mnemonic");
 }
 
 /* We detect an encrypted hsm_secret as a hsm_secret which is 73-bytes long. */
 static bool hsm_secret_is_encrypted(const char *hsm_secret_path)
 {
         switch (is_hsm_secret_encrypted(hsm_secret_path)) {
-		case -1
+		case -1:
 			err(EXITCODE_ERROR_HSM_FILE, "Cannot open '%s'", hsm_secret_path);
 		case 1:
 			return true;
