@@ -9,6 +9,7 @@
 #include <ccan/tal/grab_file/grab_file.h>
 #include <ccan/tal/path/path.h>
 #include <ccan/tal/str/str.h>
+#include <ccan/tal/tal.h>
 #include <common/bech32.h>
 #include <common/bech32_util.h>
 #include <common/codex32.h>
@@ -16,12 +17,13 @@
 #include <common/derive_basepoints.h>
 #include <common/descriptor_checksum.h>
 #include <common/errcode.h>
-#include <common/hsm_encryption.h>
+#include <common/hsm_secret.h>
 #include <common/node_id.h>
 #include <common/utils.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <wally_bip32.h>
 #include <wally_bip39.h>
@@ -34,10 +36,6 @@
 #define ERROR_TERM 7
 #define HSM_SECRET_BINARY_SIZE 32
 #define HSM_SECRET_ENCRYPTED_SIZE 73
-
-/* TODO: Fix up these forward declarations */
-static int is_mnemonic_secret(const char *path);
-static void load_mnemonic_secret(struct secret *hsm_secret, const char *path);
 
 static void show_usage(const char *progname)
 {
@@ -82,50 +80,45 @@ static bool ensure_hsm_secret_exists(int fd, const char *path)
 	return true;
 }
 
-static void grab_hsm_file(const char *hsm_secret_path,
-			  void *dst, size_t dstlen)
+/* Load hsm_secret using the new unified interface */
+static struct hsm_secret *load_hsm_secret(const tal_t *ctx, const char *hsm_secret_path)
 {
 	u8 *contents = grab_file(tmpctx, hsm_secret_path);
+	const char *passphrase = NULL;
+	char *passwd = NULL;
+	struct hsm_secret *hsms;
+
 	if (!contents)
 		errx(EXITCODE_ERROR_HSM_FILE, "Reading hsm_secret");
 
-	/* grab_file always appends a NUL char for convenience */
-	if (tal_bytelen(contents) != dstlen + 1)
-		errx(EXITCODE_ERROR_HSM_FILE,
-		     "hsm_secret invalid length %zu (expected %zu)",
-		     tal_bytelen(contents)-1, dstlen);
-	memcpy(dst, contents, dstlen);
-}
+	/* Remove the NUL terminator that grab_file adds */
+	tal_resize(&contents, tal_bytelen(contents) - 1);
 
-static void get_unencrypted_hsm_secret(struct secret *hsm_secret,
-				       const char *hsm_secret_path)
-{
-	if (is_mnemonic_secret(hsm_secret_path)) {
-		load_mnemonic_secret(hsm_secret, hsm_secret_path);
-	} else {
-		grab_hsm_file(hsm_secret_path, hsm_secret, sizeof(*hsm_secret));
+	/* Check if we need a passphrase */
+	if (hsm_secret_needs_passphrase(contents, tal_bytelen(contents))) {
+		const char *err;
+		int exit_code;
+
+		printf("Enter hsm_secret password:\n");
+		fflush(stdout);
+		passwd = read_stdin_pass_with_exit_code(&err, &exit_code);
+		if (!passwd)
+			errx(exit_code, "%s", err);
+		passphrase = passwd;
 	}
-}
 
-/* Derive the encryption key from the password provided, and try to decrypt
- * the cipher. */
-static void get_encrypted_hsm_secret(struct secret *hsm_secret,
-                                     const char *hsm_secret_path,
-                                     const char *passwd)
-{
-	struct secret key;
-	struct encrypted_hsm_secret encrypted_secret;
-	const char *err;
-	int exit_code;
+	enum hsm_secret_error err;
+	hsms = extract_hsm_secret(ctx, contents, tal_bytelen(contents), passphrase, &err);
+	if (!hsms) {
+		if (passwd)
+			free(passwd);
+		errx(EXITCODE_ERROR_HSM_FILE, "%s", hsm_secret_error_str(err));
+	}
 
-	grab_hsm_file(hsm_secret_path,
-		      &encrypted_secret, sizeof(encrypted_secret));
+	if (passwd)
+		free(passwd);
 
-	exit_code = hsm_secret_encryption_key_with_exitcode(passwd, &key, &err);
-	if (exit_code > 0)
-		errx(exit_code, "%s", err);
-	if (!decrypt_hsm_secret(&key, &encrypted_secret, hsm_secret))
-		errx(ERROR_LIBSODIUM, "Could not retrieve the seed. Wrong password ?");
+	return hsms;
 }
 
 /* Taken from hsmd. */
@@ -164,116 +157,26 @@ static void get_channel_seed(struct secret *channel_seed, struct node_id *peer_i
 	            info, strlen(info));
 }
 
-static char *read_and_validate_mnemonic_file(const char *path)
-{
-	char *mnemonic = grab_file(tmpctx, path);
-	if (!mnemonic)
-		return NULL;
-
-	size_t len = strlen(mnemonic);
-	if (len > 0 && mnemonic[len - 1] == '\n')
-		mnemonic[len - 1] = '\0';
-
-	struct words *words;
-	if (bip39_get_wordlist("en", &words) != WALLY_OK)
-		return NULL;
-
-	if (bip39_mnemonic_validate(words, mnemonic) != 0)
-		return NULL;
-
-	return mnemonic;
-}
-
-
-/* Check if the secret is a valid mnemonic */
-static int is_mnemonic_secret(const char *path)
-{
-	return read_and_validate_mnemonic_file(path) != NULL;
-}
-
-static void load_mnemonic_secret(struct secret *hsm_secret,
-                                 const char *path)
-{
-	char *mnemonic = read_and_validate_mnemonic_file(path);
-	if (!mnemonic)
-		errx(EXITCODE_ERROR_HSM_FILE, "Invalid mnemonic in hsm_secret");
-
-	//TODO: Do we need to pass a passphrase?
-	if (bip39_mnemonic_to_seed(mnemonic, "", hsm_secret->data, sizeof(hsm_secret->data), NULL) != WALLY_OK)
-		errx(EXITCODE_ERROR_HSM_FILE, "Failed to derive seed from mnemonic");
-}
-
-/* We detect an encrypted hsm_secret as a hsm_secret which is 73-bytes long. */
-static bool hsm_secret_is_encrypted(const char *hsm_secret_path)
-{
-        switch (is_hsm_secret_encrypted(hsm_secret_path)) {
-		case -1:
-			err(EXITCODE_ERROR_HSM_FILE, "Cannot open '%s'", hsm_secret_path);
-		case 1:
-			return true;
-	        case 0: {
-			/* Extra sanity check on HSM file! */
-			struct stat st;
-			stat(hsm_secret_path, &st);		
-			if (st.st_size != 32) {
-				if (is_mnemonic_secret(hsm_secret_path))
-					return false;
-				errx(EXITCODE_ERROR_HSM_FILE,
-					"Invalid hsm_secret '%s' (neither plaintext, mnemonic, nor encrypted).",
-					hsm_secret_path);
-			}
-			return false;
-		}
-	}
-
-	abort();
-}
-
-/* If encrypted, ask for a passphrase */
-static void get_hsm_secret(struct secret *hsm_secret,
-			   const char *hsm_secret_path)
-{
-	/* This checks the file existence, too. */
-	if (hsm_secret_is_encrypted(hsm_secret_path)) {
-		int exit_code;
-		char *passwd;
-		const char *err;
-
-		printf("Enter hsm_secret password:\n");
-		fflush(stdout);
-		passwd = read_stdin_pass_with_exit_code(&err, &exit_code);
-		if (!passwd)
-			errx(exit_code, "%s", err);
-		get_encrypted_hsm_secret(hsm_secret, hsm_secret_path, passwd);
-		free(passwd);
-	} else {
-		get_unencrypted_hsm_secret(hsm_secret, hsm_secret_path);
-	}
-}
-
 static int decrypt_hsm(const char *hsm_secret_path)
 {
 	int fd;
-	struct secret hsm_secret;
-	char *passwd;
-	const char *dir, *backup, *err;
-	int exit_code = 0;
-	/* This checks the file existence, too. */
-	if (!hsm_secret_is_encrypted(hsm_secret_path))
+	struct hsm_secret *hsms;
+	const char *dir, *backup;
+
+	/* Load the hsm_secret (this will prompt for password if encrypted) */
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+
+	/* Check if it was actually encrypted */
+	u8 *contents = grab_file(tmpctx, hsm_secret_path);
+	if (!contents)
+		errx(EXITCODE_ERROR_HSM_FILE, "Reading hsm_secret");
+	tal_resize(&contents, tal_bytelen(contents) - 1);
+
+	if (!hsm_secret_needs_passphrase(contents, tal_bytelen(contents)))
 		errx(ERROR_USAGE, "hsm_secret is not encrypted");
-	printf("Enter hsm_secret password:\n");
-	fflush(stdout);
-	passwd = read_stdin_pass_with_exit_code(&err, &exit_code);
-	if (!passwd)
-		errx(exit_code, "%s", err);
 
 	dir = path_dirname(NULL, hsm_secret_path);
 	backup = path_join(dir, dir, "hsm_secret.backup");
-
-	get_encrypted_hsm_secret(&hsm_secret, hsm_secret_path, passwd);
-	/* Once the encryption key derived, we don't need it anymore. */
-	if (passwd)
-		free(passwd);
 
 	/* Create a backup file, "just in case". */
 	rename(hsm_secret_path, backup);
@@ -281,7 +184,7 @@ static int decrypt_hsm(const char *hsm_secret_path)
 	if (fd < 0)
 		errx(EXITCODE_ERROR_HSM_FILE, "Could not open new hsm_secret");
 
-	if (!write_all(fd, &hsm_secret, sizeof(hsm_secret))) {
+	if (!write_all(fd, &hsms->secret, sizeof(hsms->secret))) {
 		unlink_noerr(hsm_secret_path);
 		close(fd);
 		rename("hsm_secret.backup", hsm_secret_path);
@@ -306,12 +209,13 @@ static int decrypt_hsm(const char *hsm_secret_path)
 static int make_codexsecret(const char *hsm_secret_path,
 			    const char *id)
 {
-	struct secret hsm_secret;
+	struct hsm_secret *hsms;
 	char *bip93;
 	const char *err;
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
 
-	err = codex32_secret_encode(tmpctx, "cl", id, 0, hsm_secret.data, 32, &bip93);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+
+	err = codex32_secret_encode(tmpctx, "cl", id, 0, hsms->secret.data, 32, &bip93);
 	if (err)
 		errx(ERROR_USAGE, "%s", err);
 
@@ -344,14 +248,22 @@ static int getemergencyrecover(const char *emer_rec_path)
 static int encrypt_hsm(const char *hsm_secret_path)
 {
 	int fd;
-	struct secret key, hsm_secret;
+	struct hsm_secret *hsms;
 	struct encrypted_hsm_secret encrypted_hsm_secret;
 	char *passwd, *passwd_confirmation;
 	const char *err, *dir, *backup;
 	int exit_code = 0;
 
-	/* This checks the file existence, too. */
-	if (hsm_secret_is_encrypted(hsm_secret_path))
+	/* Load the hsm_secret */
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+
+	/* Check if it's already encrypted */
+	u8 *contents = grab_file(tmpctx, hsm_secret_path);
+	if (!contents)
+		errx(EXITCODE_ERROR_HSM_FILE, "Reading hsm_secret");
+	tal_resize(&contents, tal_bytelen(contents) - 1);
+
+	if (hsm_secret_needs_passphrase(contents, tal_bytelen(contents)))
 		errx(ERROR_USAGE, "hsm_secret is already encrypted");
 
 	printf("Enter hsm_secret password:\n");
@@ -366,18 +278,36 @@ static int encrypt_hsm(const char *hsm_secret_path)
 		errx(exit_code, "%s", err);
 	if (!streq(passwd, passwd_confirmation))
 		errx(ERROR_USAGE, "Passwords confirmation mismatch.");
-	get_unencrypted_hsm_secret(&hsm_secret, hsm_secret_path);
 
 	dir = path_dirname(NULL, hsm_secret_path);
 	backup = path_join(dir, dir, "hsm_secret.backup");
 
-	/* Derive the encryption key from the password provided, and try to encrypt
-	 * the seed. */
-        exit_code = hsm_secret_encryption_key_with_exitcode(passwd, &key, &err);
-	if (exit_code > 0)
-		errx(exit_code, "%s", err);
-	if (!encrypt_hsm_secret(&key, &hsm_secret, &encrypted_hsm_secret))
+	/* Create encryption key and encrypt */
+	struct secret *encryption_key = get_encryption_key(tmpctx, passwd);
+	if (!encryption_key)
+		errx(ERROR_LIBSODIUM, "Could not derive encryption key");
+
+	/* If this is a mnemonic secret, we need to derive the binary seed first */
+	struct secret binary_secret;
+	if (hsms->mnemonic) {
+		u8 bip32_seed[BIP39_SEED_LEN_512];
+		size_t bip32_seed_len;
+		
+		if (bip39_mnemonic_to_seed(hsms->mnemonic, NULL, bip32_seed, sizeof(bip32_seed), &bip32_seed_len) != WALLY_OK)
+			errx(ERROR_LIBWALLY, "Could not derive seed from mnemonic");
+		
+		/* We only use the first 32 bytes */
+		memcpy(binary_secret.data, bip32_seed, sizeof(binary_secret.data));
+	} else {
+		/* Already a binary secret */
+		binary_secret = hsms->secret;
+	}
+
+	if (!encrypt_hsm_secret(encryption_key, &binary_secret, &encrypted_hsm_secret))
 		errx(ERROR_LIBSODIUM, "Could not encrypt the hsm_secret seed.");
+
+	/* Securely discard the encryption key */
+	discard_key(encryption_key);
 
 	/* Once the encryption key derived, we don't need it anymore. */
 	free(passwd);
@@ -416,11 +346,12 @@ static int dump_commitments_infos(struct node_id *node_id, u64 channel_id,
                                   u64 depth, char *hsm_secret_path)
 {
 	struct sha256 shaseed;
-	struct secret hsm_secret, channel_seed, per_commitment_secret;
+	struct hsm_secret *hsms;
+	struct secret channel_seed, per_commitment_secret;
 	struct pubkey per_commitment_point;
 
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
-	get_channel_seed(&channel_seed, node_id, channel_id, &hsm_secret);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	get_channel_seed(&channel_seed, node_id, channel_id, &hsms->secret);
 
 	derive_shaseed(&channel_seed, &shaseed);
 	printf("shaseed: %s\n", fmt_sha256(tmpctx, &shaseed));
@@ -453,12 +384,12 @@ static int dump_commitments_infos(struct node_id *node_id, u64 channel_id,
  * :param node_id: The id of the node with which the channel was established
  * :param tries: How many dbids to try.
  * :param hsm_secret_path: The path to the hsm_secret
- * :param passwd: The *optional* hsm_secret password
  */
 static int guess_to_remote(const char *address, struct node_id *node_id,
                            u64 tries, char *hsm_secret_path)
 {
-	struct secret hsm_secret, channel_seed, basepoint_secret;
+	struct hsm_secret *hsms;
+	struct secret channel_seed, basepoint_secret;
 	struct pubkey basepoint;
 	struct ripemd160 pubkeyhash;
 	/* We only support P2WPKH, hence 20. */
@@ -474,10 +405,10 @@ static int guess_to_remote(const char *address, struct node_id *node_id,
 	if (segwit_addr_decode(&witver, goal_pubkeyhash, &witlen, hrp, address) != 1)
 		errx(ERROR_USAGE, "Wrong bech32 address");
 
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	for (u64 dbid = 1; dbid < tries ; dbid++) {
-		get_channel_seed(&channel_seed, node_id, dbid, &hsm_secret);
+		get_channel_seed(&channel_seed, node_id, dbid, &hsms->secret);
 		if (!derive_payment_basepoint(&channel_seed,
 		                              &basepoint, &basepoint_secret))
 			errx(ERROR_KEYDERIV, "Could not derive basepoints for dbid %"PRIu64
@@ -587,6 +518,7 @@ static int generate_hsm(const char *hsm_secret_path,
 {
 	const char *err;
 	int exit_code = 0;
+	u8 hsm_type;
 
 	if (lang_id == NULL) {
 		mnemonic = read_mnemonic();
@@ -611,17 +543,17 @@ static int generate_hsm(const char *hsm_secret_path,
 			errx(ERROR_USAGE, "Invalid mnemonic: \"%s\"", mnemonic);
 	}
 
-	u8 bip32_seed[BIP39_SEED_LEN_512];
-	size_t bip32_seed_len;
-
-	if (bip39_mnemonic_to_seed(mnemonic, passphrase, bip32_seed, sizeof(bip32_seed), &bip32_seed_len) != WALLY_OK)
-		errx(ERROR_LIBWALLY, "Unable to derive BIP32 seed from BIP39 mnemonic");
-
 	int fd = open(hsm_secret_path, O_CREAT|O_EXCL|O_WRONLY, 0400);
 	if (fd < 0) {
 		errx(ERROR_USAGE, "Unable to create hsm_secret file");
 	}
-	//TODO: I'm hoping this is correct, but I'm not sure.
+
+	/* Write the type byte first */
+	hsm_type = passphrase ? 2 : 1; /* NEEDS_PASSPHRASE : NO_PASSPHRASE */
+	if (!write_all(fd, &hsm_type, 1))
+		errx(ERROR_USAGE, "Error writing type to hsm_secret file");
+
+	/* Write the mnemonic */
 	if (!write_all(fd, mnemonic, strlen(mnemonic)))
 		errx(ERROR_USAGE, "Error writing secret to hsm_secret file");
 
@@ -644,14 +576,14 @@ static int dumponchaindescriptors(const char *hsm_secret_path,
 				  const char *old_passwd UNUSED,
 				  const u32 version, bool show_secrets)
 {
-	struct secret hsm_secret;
+	struct hsm_secret *hsms;
 	u8 bip32_seed[BIP32_ENTROPY_LEN_256];
 	u32 salt = 0;
 	struct ext_key master_extkey;
 	char *enc_xkey, *descriptor;
 	struct descriptor_checksum checksum;
 
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	/* We use m/0/0/k as the derivation tree for onchain funds. */
 
@@ -659,7 +591,7 @@ static int dumponchaindescriptors(const char *hsm_secret_path,
 	do {
 		hkdf_sha256(bip32_seed, sizeof(bip32_seed),
 			    &salt, sizeof(salt),
-			    &hsm_secret, sizeof(hsm_secret),
+			    &hsms->secret, sizeof(hsms->secret),
 			    "bip32 seed", strlen("bip32 seed"));
 		salt++;
 		/* ..Which is used to derive m/ */
@@ -705,14 +637,14 @@ static int dumponchaindescriptors(const char *hsm_secret_path,
 static int check_hsm(const char *hsm_secret_path)
 {
 	char *mnemonic;
-	struct secret hsm_secret;
+	struct hsm_secret *hsms;
 	u8 bip32_seed[BIP39_SEED_LEN_512];
 	size_t bip32_seed_len;
 	int exit_code;
 	char *passphrase;
 	const char *err;
 
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	printf("Warning: remember that different passphrases yield different "
 	       "bitcoin wallets.\n");
@@ -732,7 +664,7 @@ static int check_hsm(const char *hsm_secret_path)
 		errx(ERROR_LIBWALLY, "Unable to derive BIP32 seed from BIP39 mnemonic");
 
 	/* We only use first 32 bytes */
-	if (memcmp(bip32_seed, hsm_secret.data, sizeof(hsm_secret.data)) != 0)
+	if (memcmp(bip32_seed, hsms->secret.data, sizeof(hsms->secret.data)) != 0)
 		errx(ERROR_KEYDERIV, "resulting hsm_secret did not match");
 
 	printf("OK\n");
@@ -744,15 +676,16 @@ static int check_hsm(const char *hsm_secret_path)
 
 static int make_rune(const char *hsm_secret_path)
 {
-	struct secret hsm_secret, derived_secret, rune_secret;
+	struct hsm_secret *hsms;
+	struct secret derived_secret, rune_secret;
 	struct rune *master_rune, *rune;
 
 	/* Get hsm_secret */
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	/* HSM derives a root secret for `makesecret` */
 	hkdf_sha256(&derived_secret, sizeof(struct secret), NULL, 0,
-		    &hsm_secret, sizeof(hsm_secret),
+		    &hsms->secret, sizeof(hsms->secret),
 		    "derived secrets", strlen("derived secrets"));
 
 	/* Commando derives secret using makesecret "commando" */
@@ -772,12 +705,12 @@ static int make_rune(const char *hsm_secret_path)
 static int get_node_id(const char *hsm_secret_path)
 {
 	u32 salt = 0;
-	struct secret hsm_secret;
+	struct hsm_secret *hsms;
 	struct privkey node_privkey;
 	struct pubkey node_id;
 
 	/* Get hsm_secret */
-	get_hsm_secret(&hsm_secret, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	/*~ So, there is apparently a 1 in 2^127 chance that a random value is
 	 * not a valid private key, so this never actually loops. */
@@ -787,8 +720,8 @@ static int get_node_id(const char *hsm_secret_path)
 		 * leaks somehow, the other keys are not compromised. */
 		hkdf_sha256(&node_privkey, sizeof(node_privkey),
 			    &salt, sizeof(salt),
-			    &hsm_secret,
-			    sizeof(hsm_secret),
+			    &hsms->secret,
+			    sizeof(hsms->secret),
 			    "nodeid", 6);
 		salt++;
 	} while (!secp256k1_ec_pubkey_create(secp256k1_ctx, &node_id.pubkey,
