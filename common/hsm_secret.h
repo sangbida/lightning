@@ -31,7 +31,9 @@ enum hsm_secret_error {
 	HSM_SECRET_ERR_ENCRYPTION_FAILED,
 	HSM_SECRET_ERR_WORDLIST_FAILED,
 	HSM_SECRET_ERR_SEED_DERIVATION_FAILED,
-	HSM_SECRET_ERR_INVALID_FORMAT
+	HSM_SECRET_ERR_INVALID_FORMAT,
+	HSM_SECRET_ERR_TERMINAL,
+	HSM_SECRET_ERR_MEMORY
 };
 
 /**
@@ -77,7 +79,7 @@ struct hsm_secret *extract_hsm_secret(const tal_t *ctx,
  *
  * Returns true on success.
  */
-bool encrypt_hsm_secret(const struct secret *encryption_key,
+bool encrypt_legacy_hsm_secret(const struct secret *encryption_key,
 			const struct secret *hsm_secret,
 			struct encrypted_hsm_secret *output);
 
@@ -93,7 +95,7 @@ void discard_key(struct secret *key TAKES);
  *    0: file is not encrypted
  *    1: file is encrypted
  */
-int is_hsm_secret_encrypted(const char *path);
+int is_legacy_hsm_secret_encrypted(const char *path);
 
 /**
  * Reads a passphrase from stdin, disabling terminal echo.

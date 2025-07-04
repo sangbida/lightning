@@ -271,8 +271,18 @@ static struct hsm_secret *extract_mnemonic_secret(const tal_t *ctx,
 		return tal_free(hsms);
 	}
 	
-	/* Don't derive the seed here - just leave it uninitialized or zero */
-	memset(&hsms->secret, 0, sizeof(hsms->secret));
+	/* Derive the seed from the mnemonic */
+	u8 bip32_seed[BIP39_SEED_LEN_512];
+	size_t bip32_seed_len;
+	const char *seed_passphrase = (type == HSM_SECRET_MNEMONIC_WITH_PASS) ? passphrase : NULL;
+	
+	if (bip39_mnemonic_to_seed(hsms->mnemonic, seed_passphrase, bip32_seed, sizeof(bip32_seed), &bip32_seed_len) != WALLY_OK) {
+		*err = HSM_SECRET_ERR_SEED_DERIVATION_FAILED;
+		return tal_free(hsms);
+	}
+	
+	/* We only use the first 32 bytes for the hsm_secret */
+	memcpy(hsms->secret.data, bip32_seed, sizeof(hsms->secret.data));
 	
 	*err = HSM_SECRET_OK;
 	return hsms;
@@ -302,7 +312,7 @@ struct hsm_secret *extract_hsm_secret(const tal_t *ctx,
 	}
 }
 
-bool encrypt_hsm_secret(const struct secret *encryption_key,
+bool encrypt_legacy_hsm_secret(const struct secret *encryption_key,
 			const struct secret *hsm_secret,
 			struct encrypted_hsm_secret *output)
 {
@@ -323,7 +333,7 @@ bool encrypt_hsm_secret(const struct secret *encryption_key,
 }
 
 /* Returns -1 on error (and sets errno), 0 if not encrypted, 1 if it is */
-int is_hsm_secret_encrypted(const char *path)
+int is_legacy_hsm_secret_encrypted(const char *path)
 {
 	struct stat st;
 
@@ -341,56 +351,93 @@ void discard_key(struct secret *key TAKES)
 		tal_free(key);
 }
 
-/* Read a line from stdin, do not take the newline character into account. */
-static bool getline_stdin_pass(char **passwd, size_t *passwd_size)
+static void destroy_passphrase(char *passphrase)
 {
-	if (getline(passwd, passwd_size, stdin) < 0)
+	sodium_memzero(passphrase, tal_bytelen(passphrase));
+	sodium_munlock(passphrase, tal_bytelen(passphrase));
+}
+
+/* Disable terminal echo if needed */
+static bool disable_echo(struct termios *saved_term)
+{
+	if (!isatty(fileno(stdin)))
 		return false;
 
-	if ((*passwd)[strlen(*passwd) - 1] == '\n')
-		(*passwd)[strlen(*passwd) - 1] = '\0';
+	if (tcgetattr(fileno(stdin), saved_term) != 0)
+		return false;
+
+	struct termios tmp = *saved_term;
+	tmp.c_lflag &= ~ECHO;
+
+	if (tcsetattr(fileno(stdin), TCSANOW, &tmp) != 0)
+		return false;
 
 	return true;
 }
 
-char *read_stdin_pass_with_exit_code(const char **reason, int *exit_code)
+/* Restore terminal echo if it was disabled */
+static void restore_echo(const struct termios *saved_term)
 {
-	struct termios current_term, temp_term;
-	char *passwd = NULL;
-	size_t passwd_size = 0;
+	tcsetattr(fileno(stdin), TCSANOW, saved_term);
+}
 
-	if (isatty(fileno(stdin))) {
-		/* Set a temporary term, same as current but with ECHO disabled. */
-		if (tcgetattr(fileno(stdin), &current_term) != 0) {
-			*reason = "Could not get current terminal options.";
-			*exit_code = EXITCODE_HSM_PASSWORD_INPUT_ERR;
-			return NULL;
-		}
-		temp_term = current_term;
-		temp_term.c_lflag &= ~ECHO;
-		if (tcsetattr(fileno(stdin), TCSANOW, &temp_term) != 0) {
-			*reason = "Could not disable pass echoing.";
-			*exit_code = EXITCODE_HSM_PASSWORD_INPUT_ERR;
-			return NULL;
-		}
+/* Read line from stdin (uses malloc internally) */
+static char *read_line(void)
+{
+	char *line = NULL;
+	size_t size = 0;
 
-		if (!getline_stdin_pass(&passwd, &passwd_size)) {
-			*reason = "Could not read pass from stdin.";
-			*exit_code = EXITCODE_HSM_PASSWORD_INPUT_ERR;
-			return NULL;
-		}
-
-		/* Restore the original terminal */
-		if (tcsetattr(fileno(stdin), TCSANOW, &current_term) != 0) {
-			*reason = "Could not restore terminal options.";
-			free(passwd);
-			*exit_code = EXITCODE_HSM_PASSWORD_INPUT_ERR;
-			return NULL;
-		}
-	} else if (!getline_stdin_pass(&passwd, &passwd_size)) {
-		*reason = "Could not read pass from stdin.";
-		*exit_code = EXITCODE_HSM_PASSWORD_INPUT_ERR;
+	if (getline(&line, &size, stdin) < 0) {
+		free(line);
 		return NULL;
 	}
-	return passwd;
+
+	/* Strip newline */
+	size_t len = strlen(line);
+	if (len > 0 && line[len - 1] == '\n')
+		line[len - 1] = '\0';
+
+	return line;
 }
+
+const char *read_stdin_pass(const tal_t *ctx, enum hsm_secret_error *err)
+{
+	*err = HSM_SECRET_OK;
+
+	struct termios saved_term;
+	bool echo_disabled = disable_echo(&saved_term);
+	if (isatty(fileno(stdin)) && !echo_disabled) {
+		*err = HSM_SECRET_ERR_TERMINAL;
+		return NULL;
+	}
+
+	char *input = read_line();
+	if (!input) {
+		if (echo_disabled)
+			restore_echo(&saved_term);
+		*err = HSM_SECRET_ERR_INVALID_FORMAT;
+		return NULL;
+	}
+
+	size_t len = strlen(input);
+	char *passphrase = tal_arr(ctx, char, len + 1);
+	strcpy(passphrase, input);
+	free(input);
+
+	/* Memory locking is mandatory: failure means we're on an insecure system */
+	if (sodium_mlock(passphrase, len + 1) != 0)
+		abort();
+
+	tal_add_destructor(passphrase, destroy_passphrase);
+
+	if (echo_disabled)
+		restore_echo(&saved_term);
+
+	return passphrase;
+}
+
+
+
+
+
+
