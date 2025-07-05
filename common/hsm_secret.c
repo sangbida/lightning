@@ -160,6 +160,10 @@ const char *hsm_secret_error_str(enum hsm_secret_error err)
 		return "Could not derive seed from mnemonic";
 	case HSM_SECRET_ERR_INVALID_FORMAT:
 		return "Invalid hsm_secret format";
+	case HSM_SECRET_ERR_TERMINAL:
+		return "Terminal error";
+	case HSM_SECRET_ERR_MEMORY:
+		return "Memory error";
 	}
 	return "Unknown error";
 }

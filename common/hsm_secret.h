@@ -100,10 +100,12 @@ int is_legacy_hsm_secret_encrypted(const char *path);
 /**
  * Reads a passphrase from stdin, disabling terminal echo.
  * Returns a newly allocated string on success, NULL on error.
- * @reason - on failure, this will be set to the reason.
- * @exit_code - on failure, this will be set to the recommended exit code.
+ * @ctx - tal context for allocation
+ * @err - on failure, this will be set to the error code
+ * 
+ * Returns allocated passphrase or NULL on error.
  */
-char *read_stdin_pass_with_exit_code(const char **reason, int *exit_code);
+const char *read_stdin_pass(const tal_t *ctx, enum hsm_secret_error *err);
 
 /**
  * Derive encryption key from passphrase using Argon2id.
