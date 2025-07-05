@@ -143,4 +143,14 @@ enum hsm_secret_type detect_hsm_secret_type(const u8 *hsm_secret, size_t len);
  */
 bool validate_mnemonic_passphrase(const u8 *hsm_secret, size_t len, const char *passphrase);
 
+/**
+ * Reads a BIP39 mnemonic from stdin with validation.
+ * Returns a newly allocated string on success, NULL on error.
+ * @ctx - tal context for allocation
+ * @err - optional pointer to set error code on failure
+ * 
+ * Returns tal-allocated mnemonic string or NULL on error.
+ */
+const char *read_stdin_mnemonic(const tal_t *ctx, enum hsm_secret_error *err);
+
 #endif /* LIGHTNING_COMMON_HSM_SECRET_H */

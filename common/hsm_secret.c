@@ -440,6 +440,48 @@ const char *read_stdin_pass(const tal_t *ctx, enum hsm_secret_error *err)
 	return passphrase;
 }
 
+/* Add this function to hsm_secret.c */
+const char *read_stdin_mnemonic(const tal_t *ctx, enum hsm_secret_error *err)
+{
+	*err = HSM_SECRET_OK;
+
+	printf("Introduce your BIP39 word list separated by space (at least 12 words):\n");
+	fflush(stdout);
+
+	char *line = NULL;
+	size_t size = 0;
+	if (getline(&line, &size, stdin) < 0) {
+		free(line);
+		*err = HSM_SECRET_ERR_INVALID_FORMAT;
+		return NULL;
+	}
+
+	/* Strip newline */
+	size_t len = strlen(line);
+	if (len > 0 && line[len - 1] == '\n')
+		line[len - 1] = '\0';
+
+	/* Validate mnemonic */
+	struct words *words;
+	if (bip39_get_wordlist("en", &words) != WALLY_OK) {
+		free(line);
+		*err = HSM_SECRET_ERR_WORDLIST_FAILED;
+		return NULL;
+	}
+
+	if (bip39_mnemonic_validate(words, line) != WALLY_OK) {
+		free(line);
+		*err = HSM_SECRET_ERR_INVALID_MNEMONIC;
+		return NULL;
+	}
+
+	/* Convert to tal string */
+	char *mnemonic = tal_strdup(ctx, line);
+	free(line);
+
+	return mnemonic;
+}
+
 
 
 

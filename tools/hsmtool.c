@@ -451,54 +451,15 @@ static int guess_to_remote(const char *address, struct node_id *node_id,
 	return 1;
 }
 
-static char *get_mnemonic(void) {
-	char *line = NULL;
-	size_t line_size = 0;
-
-	printf("Introduce your BIP39 word list separated by space (at least 12 words):\n");
-	fflush(stdout);
-	size_t characters = getline(&line, &line_size, stdin);
-	if (characters < 0)
-		errx(ERROR_USAGE, "Could not read line from stdin.");
-	line[characters-1] = '\0';
-	return line;
-}
-
-static char *read_mnemonic(void) {
-	char *mnemonic;
-	struct words *words;
-
-	/* Get English wordlist */
-	if (bip39_get_wordlist("en", &words) != WALLY_OK)
-		errx(ERROR_LIBWALLY, "Could not load English wordlist");
-
-	/* Get mnemonic from user */
-	mnemonic = get_mnemonic();
-
-	/* Validate mnemonic */
-	if (bip39_mnemonic_validate(words, mnemonic) != WALLY_OK) {
-		errx(ERROR_USAGE, "Invalid mnemonic: \"%s\"", mnemonic);
-	}
-	return mnemonic;
-}
-
 static int generate_hsm(const char *hsm_secret_path)
 {
-	char *mnemonic;
-	const char *passphrase;
-	struct words *words;
-	enum hsm_secret_error pass_err;
+	const char *mnemonic, *passphrase;
+	enum hsm_secret_error err;
 
-	/* Get English wordlist */
-	if (bip39_get_wordlist("en", &words) != WALLY_OK)
-		errx(ERROR_LIBWALLY, "Could not load English wordlist");
-
-	/* Get mnemonic from user */
-	mnemonic = get_mnemonic();
-
-	/* Validate mnemonic */
-	if (bip39_mnemonic_validate(words, mnemonic) != WALLY_OK)
-		errx(ERROR_USAGE, "Invalid mnemonic: \"%s\"", mnemonic);
+	/* Get mnemonic from user using consistent interface */
+	mnemonic = read_stdin_mnemonic(tmpctx, &err);
+	if (!mnemonic)
+		errx(EXITCODE_ERROR_HSM_FILE, "Could not read mnemonic: %s", hsm_secret_error_str(err));
 
 	/* Get optional passphrase */
 	printf("Warning: remember that different passphrases yield different "
@@ -506,9 +467,9 @@ static int generate_hsm(const char *hsm_secret_path)
 	printf("If left empty, no password is used (echo is disabled).\n");
 	printf("Enter your passphrase: \n");
 	fflush(stdout);
-	passphrase = read_stdin_pass(tmpctx, &pass_err);
+	passphrase = read_stdin_pass(tmpctx, &err);
 	if (!passphrase)
-		errx(EXITCODE_ERROR_HSM_FILE, "Could not read passphrase: %s", hsm_secret_error_str(pass_err));
+		errx(EXITCODE_ERROR_HSM_FILE, "Could not read passphrase: %s", hsm_secret_error_str(err));
 	if (strlen(passphrase) == 0) {
 		passphrase = NULL;
 	}
@@ -549,8 +510,7 @@ static int generate_hsm(const char *hsm_secret_path)
 		printf("Remember your passphrase - it's required to use this hsm_secret!\n");
 	}
 
-	free(mnemonic);
-	/* passphrase will be automatically cleaned up by tmpctx */
+	/* passphrase and mnemonic will be automatically cleaned up by tmpctx */
 	return 0;
 }
 
@@ -617,39 +577,55 @@ static int dumponchaindescriptors(const char *hsm_secret_path,
 
 static int check_hsm(const char *hsm_secret_path)
 {
-	char *mnemonic;
-	struct secret hsm_secret;
+	struct secret file_secret, derived_secret;
 	u8 bip32_seed[BIP39_SEED_LEN_512];
 	size_t bip32_seed_len;
-	const char *passphrase;
-	enum hsm_secret_error pass_err;
+	const char *passphrase, *mnemonic;
+	enum hsm_secret_error err;
 
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
+	/* Check what type of hsm_secret we're dealing with */
+	u8 *contents = grab_file(tmpctx, hsm_secret_path);
+	if (!contents)
+		errx(EXITCODE_ERROR_HSM_FILE, "Reading hsm_secret");
+	tal_resize(&contents, tal_bytelen(contents) - 1);
+	
+	enum hsm_secret_type type = detect_hsm_secret_type(contents, tal_bytelen(contents));
 
+	/* Get the actual seed from the file */
+	get_hsm_seed(&file_secret, hsm_secret_path);
+
+	/* Ask user for their BIP39 backup passphrase */
 	printf("Warning: remember that different passphrases yield different "
 	       "bitcoin wallets.\n");
 	printf("If left empty, no password is used (echo is disabled).\n");
 	printf("Enter your passphrase: \n");
 	fflush(stdout);
-	passphrase = read_stdin_pass(tmpctx, &pass_err);
+	passphrase = read_stdin_pass(tmpctx, &err);
 	if (!passphrase)
-		errx(EXITCODE_ERROR_HSM_FILE, "Could not read passphrase: %s", hsm_secret_error_str(pass_err));
+		errx(EXITCODE_ERROR_HSM_FILE, "Could not read passphrase: %s", hsm_secret_error_str(err));
 	if (strlen(passphrase) == 0) {
 		passphrase = NULL;
 	}
 
-	mnemonic = read_mnemonic();
+	/* Ask user for their backup mnemonic using consistent interface */
+	mnemonic = read_stdin_mnemonic(tmpctx, &err);
+	if (!mnemonic)
+		errx(EXITCODE_ERROR_HSM_FILE, "Could not read mnemonic: %s", hsm_secret_error_str(err));
+	
+	/* Derive seed from user's backup mnemonic + passphrase */
 	if (bip39_mnemonic_to_seed(mnemonic, passphrase, bip32_seed, sizeof(bip32_seed), &bip32_seed_len) != WALLY_OK)
 		errx(ERROR_LIBWALLY, "Unable to derive BIP32 seed from BIP39 mnemonic");
 
-	/* We only use first 32 bytes */
-	if (memcmp(bip32_seed, hsm_secret.data, sizeof(hsm_secret.data)) != 0)
+	/* Copy first 32 bytes to our secret for comparison */
+	memcpy(derived_secret.data, bip32_seed, sizeof(derived_secret.data));
+
+	/* Compare the seeds - this works for all formats */
+	if (memcmp(derived_secret.data, file_secret.data, sizeof(file_secret.data)) != 0)
 		errx(ERROR_KEYDERIV, "resulting hsm_secret did not match");
 
 	printf("OK\n");
 
-	free(mnemonic);
-	/* passphrase will be automatically cleaned up by tmpctx */
+	/* passphrase and mnemonic will be automatically cleaned up by tmpctx */
 	return 0;
 }
 
