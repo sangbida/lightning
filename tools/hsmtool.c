@@ -92,30 +92,6 @@ static bool ensure_hsm_secret_exists(int fd, const char *path)
 	tal_free(config_dir);
 	return true;
 }
-
-/* Derive binary seed from mnemonic hsm_secret */
-static void derive_seed_from_hsm_secret(struct hsm_secret *hsms, const char *passphrase)
-{
-	if (!hsms->mnemonic) {
-		/* Already a binary secret, nothing to do */
-		return;
-	}
-
-	u8 bip32_seed[BIP39_SEED_LEN_512];
-	size_t bip32_seed_len;
-	
-	const char *seed_passphrase = "";
-	if (hsms->type == HSM_SECRET_MNEMONIC_WITH_PASS && passphrase)
-		seed_passphrase = passphrase;
-		
-	if (bip39_mnemonic_to_seed(hsms->mnemonic, seed_passphrase, 
-				   bip32_seed, sizeof(bip32_seed), &bip32_seed_len) != WALLY_OK) {
-		errx(EXITCODE_ERROR_HSM_FILE, "Could not derive seed from mnemonic");
-	}
-	
-	memcpy(hsms->secret.data, bip32_seed, sizeof(hsms->secret.data));
-}
-
 /* Load hsm_secret using the unified interface */
 static struct hsm_secret *load_hsm_secret(const tal_t *ctx, const char *hsm_secret_path)
 {
@@ -146,37 +122,6 @@ static struct hsm_secret *load_hsm_secret(const tal_t *ctx, const char *hsm_secr
 	return hsms;
 }
 
-/* Get the 32-byte binary seed from any hsm_secret format */
-static void get_hsm_seed(struct secret *hsm_secret, const char *hsm_secret_path)
-{
-	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
-	
-	/* For mnemonic secrets, we need to derive the binary seed */
-	if (hsms->mnemonic) {
-		/* We need the passphrase for seed derivation if it's a protected mnemonic */
-		const char *passphrase = NULL;
-		
-		if (hsms->type == HSM_SECRET_MNEMONIC_WITH_PASS) {
-			/* We need the passphrase again for seed derivation */
-			printf("Enter hsm_secret password for seed derivation:\n");
-			fflush(stdout);
-			enum hsm_secret_error pass_err;
-			passphrase = read_stdin_pass(tmpctx, &pass_err);
-			if (!passphrase)
-				errx(EXITCODE_ERROR_HSM_FILE, "Could not read password: %s", hsm_secret_error_str(pass_err));
-		}
-		
-		derive_seed_from_hsm_secret(hsms, passphrase);
-		/* passphrase will be automatically cleaned up by tmpctx */
-	}
-	*hsm_secret = hsms->secret;
-}
-
-static struct hsm_secret *get_hsm_secret(const tal_t *ctx, const char *hsm_secret_path)
-{
-	return load_hsm_secret(ctx, hsm_secret_path);
-}
-
 /* Legacy function - only works with binary encrypted format */
 static int decrypt_hsm(const char *hsm_secret_path)
 {
@@ -200,7 +145,7 @@ static int decrypt_hsm(const char *hsm_secret_path)
 	}
 
 	/* Load the hsm_secret */
-	hsms = get_hsm_secret(tmpctx, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	dir = path_dirname(NULL, hsm_secret_path);
 	backup = path_join(dir, dir, "hsm_secret.backup");
@@ -259,7 +204,7 @@ static int encrypt_hsm(const char *hsm_secret_path)
 	}
 
 	/* Load the hsm_secret */
-	hsms = get_hsm_secret(tmpctx, hsm_secret_path);
+	hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 
 	printf("Enter hsm_secret password:\n");
 	fflush(stdout);
@@ -289,8 +234,6 @@ static int encrypt_hsm(const char *hsm_secret_path)
 
 	/* Securely discard the encryption key */
 	discard_key(encryption_key);
-
-	/* Passwords will be automatically cleaned up by tmpctx */
 
 	/* Create a backup file, "just in case". */
 	rename(hsm_secret_path, backup);
@@ -347,7 +290,8 @@ static int make_codexsecret(const char *hsm_secret_path, const char *id)
 	struct secret hsm_secret;
 	char *bip93;
 	const char *err;
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	hsm_secret = hsms->secret;
 
 	err = codex32_secret_encode(tmpctx, "cl", id, 0, hsm_secret.data, 32, &bip93);
 	if (err)
@@ -385,8 +329,8 @@ static int dump_commitments_infos(struct node_id *node_id, u64 channel_id,
 	struct sha256 shaseed;
 	struct secret hsm_secret, channel_seed, per_commitment_secret;
 	struct pubkey per_commitment_point;
-
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	hsm_secret = hsms->secret;
 	get_channel_seed(&channel_seed, node_id, channel_id, &hsm_secret);
 
 	derive_shaseed(&channel_seed, &shaseed);
@@ -423,7 +367,8 @@ static int guess_to_remote(const char *address, struct node_id *node_id,
 	if (segwit_addr_decode(&witver, goal_pubkeyhash, &witlen, hrp, address) != 1)
 		errx(ERROR_USAGE, "Wrong bech32 address");
 
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	hsm_secret = hsms->secret;
 
 	for (u64 dbid = 1; dbid < tries ; dbid++) {
 		get_channel_seed(&channel_seed, node_id, dbid, &hsm_secret);
@@ -523,11 +468,9 @@ static int dumponchaindescriptors(const char *hsm_secret_path,
 	struct ext_key master_extkey;
 	char *enc_xkey, *descriptor;
 	struct descriptor_checksum checksum;
-
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
-
-	/* We use m/0/0/k as the derivation tree for onchain funds. */
-
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	hsm_secret = hsms->secret;
+	
 	/* The root seed is derived from hsm_secret using hkdf.. */
 	do {
 		hkdf_sha256(bip32_seed, sizeof(bip32_seed),
@@ -592,7 +535,8 @@ static int check_hsm(const char *hsm_secret_path)
 	enum hsm_secret_type type = detect_hsm_secret_type(contents, tal_bytelen(contents));
 
 	/* Get the actual seed from the file */
-	get_hsm_seed(&file_secret, hsm_secret_path);
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	file_secret = hsms->secret;
 
 	/* Ask user for their BIP39 backup passphrase */
 	printf("Warning: remember that different passphrases yield different "
@@ -633,9 +577,8 @@ static int make_rune(const char *hsm_secret_path)
 {
 	struct secret hsm_secret, derived_secret, rune_secret;
 	struct rune *master_rune, *rune;
-
-	/* Get hsm_secret */
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	hsm_secret = hsms->secret;
 
 	/* HSM derives a root secret for `makesecret` */
 	hkdf_sha256(&derived_secret, sizeof(struct secret), NULL, 0,
@@ -662,9 +605,8 @@ static int get_node_id(const char *hsm_secret_path)
 	struct secret hsm_secret;
 	struct privkey node_privkey;
 	struct pubkey node_id;
-
-	/* Get hsm_secret */
-	get_hsm_seed(&hsm_secret, hsm_secret_path);
+	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
+	hsm_secret = hsms->secret;
 
 	/*~ So, there is apparently a 1 in 2^127 chance that a random value is
 	 * not a valid private key, so this never actually loops. */

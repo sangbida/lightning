@@ -84,7 +84,6 @@ enum hsm_secret_type detect_hsm_secret_type(const u8 *hsm_secret, size_t len)
 		return HSM_SECRET_ENCRYPTED;
 	
 	/* Check if it starts with our type bytes (mnemonic formats) */
-	//TODO: We can possibly remove this check, and check the first 32 bytes to see if they are are all zero
 	if (len > 32) {
 		if (memeqzero(hsm_secret, 32))
 			return HSM_SECRET_MNEMONIC_NO_PASS;
