@@ -1532,14 +1532,15 @@ def test_hsmtool_checkhsm_with_passphrase(node_factory):
     hsmtool = HsmTool(node_factory.directory, "checkhsm", hsm_path)
     master_fd, slave_fd = os.openpty()
     hsmtool.start(stdin=slave_fd)
-    hsmtool.wait_for_log(r"Enter hsm_secret password:")  # Unlock file
+    hsmtool.wait_for_log(r"Enter hsm_secret password:")  # Decrypt file
     write_all(master_fd, "secret_passphrase\n".encode("utf-8"))
-    hsmtool.wait_for_log(r"Enter your passphrase:")  # Verification passphrase
+    hsmtool.wait_for_log(r"Enter your passphrase:")     # Backup verification
     write_all(master_fd, "secret_passphrase\n".encode("utf-8"))
     hsmtool.wait_for_log(r"Introduce your BIP39 word list")
     write_all(master_fd, "ritual idle hat sunny universe pluck key alpha wing cake have wedding\n".encode("utf-8"))
     assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
     hsmtool.is_in_log(r"OK")
+
 
 
 def test_hsmtool_checkhsm_no_passphrase(node_factory):
@@ -2059,8 +2060,6 @@ def test_hsmtool_makerune(node_factory):
     hsmtool = HsmTool(node_factory.directory, "generatehsm", hsm_path)
     master_fd, slave_fd = os.openpty()
     hsmtool.start(stdin=slave_fd)
-    hsmtool.wait_for_log(r"Select your language:")
-    write_all(master_fd, "0\n".encode("utf-8"))
     hsmtool.wait_for_log(r"Introduce your BIP39 word list")
     write_all(master_fd, "ritual idle hat sunny universe pluck key alpha wing "
               "cake have wedding\n".encode("utf-8"))
@@ -2069,8 +2068,14 @@ def test_hsmtool_makerune(node_factory):
     assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
     hsmtool.is_in_log(r"New hsm_secret file created")
 
-    cmd_line = ["tools/hsmtool", "makerune", hsm_path]
-    out = subprocess.check_output(cmd_line).decode("utf8").split("\n")[0]
+    # Test makerune with the passphrase
+    hsmtool = HsmTool(node_factory.directory, "makerune", hsm_path)
+    master_fd, slave_fd = os.openpty()
+    hsmtool.start(stdin=slave_fd)
+    hsmtool.wait_for_log(r"Enter hsm_secret password:")
+    write_all(master_fd, "This is actually not a passphrase\n".encode("utf-8"))
+    assert hsmtool.proc.wait(WAIT_TIMEOUT) == 0
+    out = hsmtool.logs.split("\n")[-2]  # Get the rune output (last line before empty line)
 
     l1.start()
 

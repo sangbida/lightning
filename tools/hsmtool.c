@@ -532,8 +532,6 @@ static int check_hsm(const char *hsm_secret_path)
 		errx(EXITCODE_ERROR_HSM_FILE, "Reading hsm_secret");
 	tal_resize(&contents, tal_bytelen(contents) - 1);
 	
-	enum hsm_secret_type type = detect_hsm_secret_type(contents, tal_bytelen(contents));
-
 	/* Get the actual seed from the file */
 	struct hsm_secret *hsms = load_hsm_secret(tmpctx, hsm_secret_path);
 	file_secret = hsms->secret;
