@@ -564,12 +564,20 @@ static void prompt(struct lightningd *ld, const char *str)
  * The algorithm used to derive the key is Argon2(id), to which libsodium
  * defaults. However argon2id-specific constants are used in case someone runs it
  * with a libsodium version which default constants differs (typically <1.0.9).
+ * 
+ * DEPRECATED: Use --hsm-passphrase instead.
  */
 static char *opt_set_hsm_password(struct lightningd *ld)
 {
 	char *passwd, *passwd_confirmation;
 	const char *err_msg;
 	int is_encrypted;
+
+	/* Show deprecation warning */
+	if (!opt_deprecated_ok(ld, "--encrypted-hsm", 
+			      "Use --hsm-passphrase=<passphrase> instead",
+			      "v25.05", "v26.05"))
+		return "--encrypted-hsm is deprecated, use --hsm-passphrase=<passphrase> instead";
 
         is_encrypted = is_hsm_secret_encrypted("hsm_secret");
 	/* While lightningd is performing the first initialization
@@ -1550,9 +1558,12 @@ static void register_opts(struct lightningd *ld)
 	opt_register_early_noarg("--disable-dns", opt_set_invbool, &ld->config.use_dns,
 				 "Disable DNS lookups of peers");
 
+	/* Deprecated: use --hsm-passphrase instead */
 	opt_register_noarg("--encrypted-hsm", opt_set_hsm_password, ld,
-					  "Set the password to encrypt hsm_secret with. If no password is passed through command line, "
-					  "you will be prompted to enter it.");
+					  opt_hidden);
+
+	opt_register_arg("--hsm-passphrase", opt_set_hsm_passphrase, NULL, ld,
+			 "Passphrase for encrypted hsm_secret (replaces --encrypted-hsm)");
 
 	opt_register_arg("--rpc-file-mode", &opt_set_mode, &opt_show_mode,
 			 &ld->rpc_filemode,
@@ -1861,5 +1872,6 @@ bool is_known_opt_cb_arg(char *(*cb_arg)(const char *, void *))
 		|| cb_arg == (void *)opt_force_privkey
 		|| cb_arg == (void *)opt_force_bip32_seed
 		|| cb_arg == (void *)opt_force_channel_secrets
-		|| cb_arg == (void *)opt_force_tmp_channel_id;
+		|| cb_arg == (void *)opt_force_tmp_channel_id
+		|| cb_arg == (void *)opt_set_hsm_passphrase;
 }

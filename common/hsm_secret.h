@@ -45,10 +45,6 @@ struct hsm_secret {
     enum hsm_secret_type type;
 };
 
-struct encrypted_hsm_secret {
-    u8 data[ENCRYPTED_HSM_SECRET_LEN];
-};
-
 /**
  * Checks whether the hsm_secret data requires a passphrase to decrypt.
  * Handles legacy, encrypted, and mnemonic-based formats.
@@ -75,13 +71,13 @@ struct hsm_secret *extract_hsm_secret(const tal_t *ctx,
  * Encrypt a given hsm_secret using a provided encryption key.
  * @encryption_key - derived from passphrase (via Argon2)
  * @hsm_secret - plaintext secret to encrypt
- * @output - output struct containing encrypted data
+ * @output - output buffer for encrypted data (must be ENCRYPTED_HSM_SECRET_LEN bytes)
  *
  * Returns true on success.
  */
 bool encrypt_legacy_hsm_secret(const struct secret *encryption_key,
 			const struct secret *hsm_secret,
-			struct encrypted_hsm_secret *output);
+			u8 *output);
 
 /**
  * Securely discard an encryption key from memory.
@@ -152,5 +148,15 @@ bool validate_mnemonic_passphrase(const u8 *hsm_secret, size_t len, const char *
  * Returns tal-allocated mnemonic string or NULL on error.
  */
 const char *read_stdin_mnemonic(const tal_t *ctx, enum hsm_secret_error *err);
+
+/**
+ * Derive seed hash from mnemonic + passphrase.
+ * @mnemonic - the BIP39 mnemonic
+ * @passphrase - the passphrase (can be NULL)
+ * @seed_hash - output parameter for the derived seed hash
+ * 
+ * Returns true on success, false on failure.
+ */
+bool derive_seed_hash(const char *mnemonic, const char *passphrase, struct sha256 *seed_hash);
 
 #endif /* LIGHTNING_COMMON_HSM_SECRET_H */
