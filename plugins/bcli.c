@@ -66,6 +66,11 @@ struct bitcoind {
 
 	/* Override in case we're developer mode for testing*/
 	bool dev_no_fake_fees;
+
+	/* Block polling state */
+	u32 last_height;
+	char *last_hash;
+	struct plugin_timer *poll_timer;
 };
 
 static struct bitcoind *bitcoind;
@@ -813,6 +818,77 @@ static struct command_result *getchaininfo(struct command *cmd,
 	return command_still_pending(cmd);
 }
 
+/* ============ Block polling implementation ============ */
+
+/* Forward declaration - needed for circular dependency */
+static struct command_result *poll_for_new_blocks(struct command *cmd, void *plugin_ptr UNUSED);
+
+/* Process getblockchaininfo result during polling */
+static struct command_result *process_poll_chaintip(struct bitcoin_cli *bcli)
+{
+	struct command *cmd = bcli->cmd;
+	const jsmntok_t *tokens;
+	const char *err;
+	u32 height;
+	const char *blockhash;
+	struct json_stream *notification;
+
+	/* Handle error cases first */
+	if (bcli->exitstatus && *bcli->exitstatus != 0) {
+		plugin_log(cmd->plugin, LOG_INFORM, "Failed to get blockchain info");
+	} else if (!(tokens = json_parse_simple(bcli, bcli->output, bcli->output_bytes))) {
+		plugin_log(cmd->plugin, LOG_INFORM, "Failed to parse response");
+	} else if ((err = json_scan(tmpctx, bcli->output, tokens,
+				    "{blocks:%,bestblockhash:%}",
+				    JSON_SCAN(json_to_number, &height),
+				    JSON_SCAN_TAL(tmpctx, json_strdup, &blockhash)))) {
+		plugin_log(cmd->plugin, LOG_INFORM, "Parse error: %s", err);
+	} else if (bitcoind->last_height == 0) {
+		/* First poll - initialize state */
+		plugin_log(cmd->plugin, LOG_INFORM,
+			   "Initial blockchain state: height=%u", height);
+		bitcoind->last_height = height;
+		bitcoind->last_hash = tal_strdup(bitcoind, blockhash);
+	} else if (height != bitcoind->last_height ||
+		   !streq(blockhash, bitcoind->last_hash)) {
+		/* Tip changed - send notification to lightningd */
+		plugin_log(cmd->plugin, LOG_INFORM,
+			   "Block change: %u -> %u",
+			   bitcoind->last_height, height);
+
+		notification = plugin_notification_start(tmpctx, "bcli_block_detected");
+		json_add_u32(notification, "height", height);
+		json_add_string(notification, "hash", blockhash);
+		plugin_notification_end(cmd->plugin, notification);
+
+		bitcoind->last_height = height;
+		tal_free(bitcoind->last_hash);
+		bitcoind->last_hash = tal_strdup(bitcoind, blockhash);
+	}
+
+	/* Always reschedule the next poll */
+	bitcoind->poll_timer = global_timer(cmd->plugin,
+					    time_from_sec(10),
+					    poll_for_new_blocks, cmd->plugin);
+
+	/* Tell framework we're done - this will free cmd */
+	return timer_complete(cmd);
+}
+
+/* Poll timer callback - starts the block check */
+static struct command_result *poll_for_new_blocks(struct command *cmd, void *plugin_ptr UNUSED)
+{
+	/* Get current blockchain state (height + hash) in one RPC call.
+	 * The framework created cmd for us when the timer fired.
+	 * We use LOW priority so this background polling doesn't block
+	 * urgent operations. */
+	start_bitcoin_cli(NULL, cmd, process_poll_chaintip, true,
+			  BITCOIND_LOW_PRIO, NULL, "getblockchaininfo", NULL);
+
+	/* Tell framework to keep cmd alive until bitcoin-cli responds */
+	return command_still_pending(cmd);
+}
+
 /* Mutual recursion. */
 static struct command_result *estimatefees_done(struct bitcoin_cli *bcli);
 
@@ -1110,6 +1186,12 @@ static const char *init(struct command *init_cmd, const char *buffer UNUSED,
 	plugin_log(init_cmd->plugin, LOG_INFORM,
 		   "bitcoin-cli initialized and connected to bitcoind.");
 
+	/* Start the poll timer to check for new blocks */
+	bitcoind->poll_timer = global_timer(init_cmd->plugin,
+					    time_from_sec(10),
+					    poll_for_new_blocks,
+					    init_cmd->plugin);
+
 	return NULL;
 }
 
@@ -1158,8 +1240,18 @@ static struct bitcoind *new_bitcoind(const tal_t *ctx)
 	bitcoind->rpcclienttimeout = 60;
 	bitcoind->dev_no_fake_fees = false;
 
+	/* Initialize block polling state */
+	bitcoind->last_height = 0;
+	bitcoind->last_hash = NULL;
+	bitcoind->poll_timer = NULL;
+
 	return bitcoind;
 }
+
+/* Notification topics we publish */
+static const char *notification_topics[] = {
+	"bcli_block_detected",
+};
 
 int main(int argc, char *argv[])
 {
@@ -1170,7 +1262,8 @@ int main(int argc, char *argv[])
 
 	plugin_main(argv, init, NULL, PLUGIN_STATIC, false /* Do not init RPC on startup*/,
 		    NULL, commands, ARRAY_SIZE(commands),
-		    NULL, 0, NULL, 0, NULL, 0,
+		    NULL, 0, NULL, 0,
+		    notification_topics, ARRAY_SIZE(notification_topics),
 		    plugin_option("bitcoin-datadir",
 				  "string",
 				  "-datadir arg for bitcoin-cli",
