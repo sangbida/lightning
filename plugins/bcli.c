@@ -1,6 +1,10 @@
 #include "config.h"
+#include <bitcoin/block.h>
+#include <bitcoin/tx.h>
 #include <ccan/array_size/array_size.h>
 #include <ccan/cast/cast.h>
+#include <ccan/crypto/siphash24/siphash24.h>
+#include <ccan/htable/htable_type.h>
 #include <ccan/io/io.h>
 #include <ccan/pipecmd/pipecmd.h>
 #include <ccan/read_write_all/read_write_all.h>
@@ -26,6 +30,118 @@ enum bitcoind_prio {
 	BITCOIND_HIGH_PRIO
 };
 #define BITCOIND_NUM_PRIO (BITCOIND_HIGH_PRIO+1)
+
+/* State machine for block filtering */
+enum bcli_state {
+	STATE_INITIALIZING,  /* Starting up, before watches received */
+	STATE_PROVISIONAL,   /* Buffering blocks, waiting for watch sync */
+	STATE_SYNCING,       /* Receiving watches from lightningd */
+	STATE_ACTIVE,        /* Normal operation - filtering enabled */
+};
+
+/* Watch for outputs to specific scriptpubkeys */
+struct scriptpubkey_watch {
+	u8 *scriptpubkey;  /* tal_arr - the script to watch for */
+};
+
+/* Hash table functions for scriptpubkey watches */
+static const u8 *scriptpubkey_watch_keyof(const struct scriptpubkey_watch *w)
+{
+	return w->scriptpubkey;
+}
+
+static size_t scriptpubkey_hash(const u8 *scriptpubkey)
+{
+	return siphash24(siphash_seed(), scriptpubkey, tal_bytelen(scriptpubkey));
+}
+
+static bool scriptpubkey_watch_eq(const struct scriptpubkey_watch *w, const u8 *scriptpubkey)
+{
+	if (tal_bytelen(w->scriptpubkey) != tal_bytelen(scriptpubkey))
+		return false;
+	return memcmp(w->scriptpubkey, scriptpubkey, tal_bytelen(scriptpubkey)) == 0;
+}
+
+HTABLE_DEFINE_NODUPS_TYPE(struct scriptpubkey_watch,
+			  scriptpubkey_watch_keyof,
+			  scriptpubkey_hash,
+			  scriptpubkey_watch_eq,
+			  scriptpubkey_watch_hash);
+
+/* Watch for specific transaction IDs */
+struct txid_watch {
+	struct bitcoin_txid txid;  /* The transaction ID to watch for */
+};
+
+/* Hash table functions for txid watches */
+static const struct bitcoin_txid *txid_watch_keyof(const struct txid_watch *w)
+{
+	return &w->txid;
+}
+
+static size_t txid_hash(const struct bitcoin_txid *txid)
+{
+	return siphash24(siphash_seed(), txid, sizeof(*txid));
+}
+
+static bool txid_watch_eq(const struct txid_watch *w, const struct bitcoin_txid *txid)
+{
+	return bitcoin_txid_eq(&w->txid, txid);
+}
+
+HTABLE_DEFINE_NODUPS_TYPE(struct txid_watch,
+			  txid_watch_keyof,
+			  txid_hash,
+			  txid_watch_eq,
+			  txid_watch_hash);
+
+/* Watch for specific outpoints (outputs being spent) */
+struct outpoint_watch {
+	struct bitcoin_outpoint outpoint;  /* The output to watch */
+};
+
+/* Hash table functions for outpoint watches */
+static const struct bitcoin_outpoint *outpoint_watch_keyof(const struct outpoint_watch *w)
+{
+	return &w->outpoint;
+}
+
+static size_t outpoint_hash(const struct bitcoin_outpoint *outpoint)
+{
+	/* Hash the txid and output index together */
+	BUILD_ASSERT(offsetof(struct bitcoin_outpoint, n)
+		     == sizeof(((struct bitcoin_outpoint *)NULL)->txid));
+	return siphash24(siphash_seed(), outpoint,
+			 sizeof(outpoint->txid) + sizeof(outpoint->n));
+}
+
+static bool outpoint_watch_eq(const struct outpoint_watch *w, const struct bitcoin_outpoint *outpoint)
+{
+	return bitcoin_txid_eq(&w->outpoint.txid, &outpoint->txid)
+		&& w->outpoint.n == outpoint->n;
+}
+
+HTABLE_DEFINE_NODUPS_TYPE(struct outpoint_watch,
+			  outpoint_watch_keyof,
+			  outpoint_hash,
+			  outpoint_watch_eq,
+			  outpoint_watch_hash);
+
+/* Watch management - tracks different types of watches from lightningd */
+struct watch_man {
+	/* Hash tables for O(1) lookup, add, and remove */
+	struct scriptpubkey_watch_hash *scriptpubkey_watches;
+	struct txid_watch_hash *txid_watches;
+	struct outpoint_watch_hash *outpoint_watches;
+};
+
+/* Buffered block during startup */
+struct buffered_block {
+	u32 height;
+	char *hash;
+	char *raw_block;
+	struct buffered_block *next;
+};
 
 struct bitcoind {
 	/* eg. "bitcoin-cli" */
@@ -71,13 +187,31 @@ struct bitcoind {
 	u32 last_height;
 	char *last_hash;
 	struct plugin_timer *poll_timer;
+	u64 poll_interval;  /* Seconds between polls (default 10) */
 
 	/* Pending block change (not yet notified) */
 	u32 pending_height;
 	char *pending_hash;
 };
 
+/* Main plugin state structure */
+struct bcli_plugin {
+	/* Bitcoin backend interface */
+	struct bitcoind *bitcoind;
+
+	/* State machine for block filtering */
+	enum bcli_state state;
+
+	/* Watch management for filtering blocks */
+	struct watch_man *watches;
+
+	/* Buffered blocks during startup (linked list) */
+	struct buffered_block *buffered_blocks;
+	struct buffered_block *buffered_blocks_tail;
+};
+
 static struct bitcoind *bitcoind;
+static struct bcli_plugin *bcli_plugin;
 
 struct bitcoin_cli {
 	struct list_node list;
@@ -95,6 +229,308 @@ struct bitcoin_cli {
 	/* Used to stash content between multiple calls */
 	void *stash;
 };
+
+/* Initialize bitcoind structure */
+static struct bitcoind *new_bitcoind(const tal_t *ctx)
+{
+	bitcoind = tal(ctx, struct bitcoind);
+
+	bitcoind->cli = NULL;
+	bitcoind->datadir = NULL;
+	for (size_t i = 0; i < BITCOIND_NUM_PRIO; i++) {
+		bitcoind->num_requests[i] = 0;
+		list_head_init(&bitcoind->pending[i]);
+	}
+	list_head_init(&bitcoind->current);
+	bitcoind->error_count = 0;
+	bitcoind->retry_timeout = 60;
+	bitcoind->rpcuser = NULL;
+	bitcoind->rpcpass = NULL;
+	bitcoind->rpcconnect = NULL;
+	bitcoind->rpcport = NULL;
+	/* Do not exceed retry_timeout value to avoid a bitcoind hang,
+	   although normal rpcclienttimeout default value is 900. */
+	bitcoind->rpcclienttimeout = 60;
+	bitcoind->dev_no_fake_fees = false;
+
+	/* Initialize block polling state */
+	bitcoind->last_height = 0;
+	bitcoind->last_hash = NULL;
+	bitcoind->poll_timer = NULL;
+	bitcoind->poll_interval = 10;  /* Default to 10 seconds */
+	bitcoind->pending_height = 0;
+	bitcoind->pending_hash = NULL;
+
+	return bitcoind;
+}
+
+/* Initialize watch manager with empty watch lists */
+static struct watch_man *new_watch_man(const tal_t *ctx)
+{
+	struct watch_man *wm = tal(ctx, struct watch_man);
+
+	/* Initialize hash tables as tal objects */
+	wm->scriptpubkey_watches = new_htable(wm, scriptpubkey_watch_hash);
+	wm->txid_watches = new_htable(wm, txid_watch_hash);
+	wm->outpoint_watches = new_htable(wm, outpoint_watch_hash);
+
+	return wm;
+}
+
+/* Initialize the plugin state structure */
+static struct bcli_plugin *new_bcli_plugin(const tal_t *ctx, struct bitcoind *bitcoind_ptr)
+{
+	struct bcli_plugin *plugin = tal(ctx, struct bcli_plugin);
+
+	plugin->bitcoind = bitcoind_ptr;
+	plugin->state = STATE_INITIALIZING;
+	plugin->watches = new_watch_man(plugin);
+	plugin->buffered_blocks = NULL;
+	plugin->buffered_blocks_tail = NULL;
+
+	return plugin;
+}
+
+/* Helper function to get state name for logging */
+static const char *bcli_state_name(enum bcli_state state)
+{
+	switch (state) {
+	case STATE_INITIALIZING: return "INITIALIZING";
+	case STATE_PROVISIONAL: return "PROVISIONAL";
+	case STATE_SYNCING: return "SYNCING";
+	case STATE_ACTIVE: return "ACTIVE";
+	}
+	return "UNKNOWN";
+}
+
+/* Buffer a block during PROVISIONAL/SYNCING states */
+static void buffer_block(u32 height, const char *hash, const char *raw_block)
+{
+	struct buffered_block *block = tal(bcli_plugin, struct buffered_block);
+
+	block->height = height;
+	block->hash = tal_strdup(block, hash);
+	block->raw_block = tal_strdup(block, raw_block);
+	block->next = NULL;
+
+	/* Add to linked list */
+	if (!bcli_plugin->buffered_blocks) {
+		bcli_plugin->buffered_blocks = block;
+		bcli_plugin->buffered_blocks_tail = block;
+	} else {
+		bcli_plugin->buffered_blocks_tail->next = block;
+		bcli_plugin->buffered_blocks_tail = block;
+	}
+}
+
+/* Check if transaction ID is being watched */
+static bool is_txid_watched(const struct bitcoin_txid *txid)
+{
+	return txid_watch_hash_get(bcli_plugin->watches->txid_watches, txid) != NULL;
+}
+
+/* Check if any outputs in the transaction have watched scriptpubkeys */
+static bool has_watched_scriptpubkey(const struct bitcoin_tx *tx)
+{
+	for (size_t i = 0; i < tx->wtx->num_outputs; i++) {
+		const u8 *scriptpubkey = tal_dup_arr(tmpctx, u8,
+						     tx->wtx->outputs[i].script,
+						     tx->wtx->outputs[i].script_len, 0);
+
+		if (scriptpubkey_watch_hash_get(bcli_plugin->watches->scriptpubkey_watches,
+						scriptpubkey))
+			return true;
+	}
+	return false;
+}
+
+/* Check if any inputs in the transaction spend watched outpoints */
+static bool spends_watched_outpoint(const struct bitcoin_tx *tx)
+{
+	for (size_t i = 0; i < tx->wtx->num_inputs; i++) {
+		struct bitcoin_outpoint outpoint;
+
+		memcpy(&outpoint.txid, tx->wtx->inputs[i].txhash, sizeof(outpoint.txid));
+		outpoint.n = tx->wtx->inputs[i].index;
+
+		if (outpoint_watch_hash_get(bcli_plugin->watches->outpoint_watches,
+					    &outpoint))
+			return true;
+	}
+	return false;
+}
+
+/* Filter a block and send relevant transactions to lightningd
+ * Returns true if any matches found */
+static bool filter_and_send_block(struct plugin *plugin,
+				   u32 height,
+				   const char *block_hash,
+				   const char *raw_block_hex)
+{
+	struct bitcoin_block *block;
+	const char **relevant_txs;
+	struct json_stream *notification;
+
+	/* Parse the block */
+	block = bitcoin_block_from_hex(tmpctx, chainparams, raw_block_hex, strlen(raw_block_hex));
+	if (!block) {
+		plugin_log(plugin, LOG_UNUSUAL,
+			   "Failed to parse block %s at height %u",
+			   block_hash, height);
+		return false;
+	}
+
+	plugin_log(plugin, LOG_DBG,
+		   "Filtering block %u (%s) with %zu transactions",
+		   height, block_hash, tal_count(block->tx));
+
+	/* Collect all matching transactions */
+	relevant_txs = tal_arr(tmpctx, const char *, 0);
+
+	/* Iterate through all transactions in the block */
+	for (size_t i = 0; i < tal_count(block->tx); i++) {
+		const struct bitcoin_tx *tx = block->tx[i];
+		struct bitcoin_txid txid;
+		bool tx_matches = false;
+
+		bitcoin_txid(tx, &txid);
+
+		/* Check all watch types */
+		if (is_txid_watched(&txid)) {
+			plugin_log(plugin, LOG_DBG,
+				   "Found watched txid: %s",
+				   fmt_bitcoin_txid(tmpctx, &txid));
+			tx_matches = true;
+		} else if (has_watched_scriptpubkey(tx)) {
+			plugin_log(plugin, LOG_DBG,
+				   "Found watched scriptpubkey in tx %s",
+				   fmt_bitcoin_txid(tmpctx, &txid));
+			tx_matches = true;
+		} else if (spends_watched_outpoint(tx)) {
+			plugin_log(plugin, LOG_DBG,
+				   "Found watched outpoint spent in tx %s",
+				   fmt_bitcoin_txid(tmpctx, &txid));
+			tx_matches = true;
+		}
+
+		/* If transaction matches, add to relevant_txs array */
+		if (tx_matches) {
+			const char *tx_hex = tal_hex(relevant_txs, linearize_tx(tmpctx, tx));
+			tal_arr_expand(&relevant_txs, tx_hex);
+		}
+	}
+
+	/* Send notification only if we found matches */
+	if (tal_count(relevant_txs) > 0) {
+		const u8 *header_bytes;
+
+		plugin_log(plugin, LOG_DBG,
+			   "Found %zu relevant transactions in block %u",
+			   tal_count(relevant_txs), height);
+
+		/* Copy block header to a tal array so we can use tal_hex */
+		header_bytes = tal_dup_arr(tmpctx, u8, (u8 *)&block->hdr, sizeof(block->hdr), 0);
+
+		notification = plugin_notification_start(tmpctx, "bcli_block_detected");
+		json_add_u32(notification, "height", height);
+		json_add_string(notification, "hash", block_hash);
+		json_add_string(notification, "header", tal_hex(tmpctx, header_bytes));
+
+		json_array_start(notification, "relevant_txs");
+		for (size_t i = 0; i < tal_count(relevant_txs); i++) {
+			json_add_string(notification, NULL, relevant_txs[i]);
+		}
+		json_array_end(notification);
+
+		plugin_notification_end(plugin, notification);
+		return true;
+	} else {
+		plugin_log(plugin, LOG_DBG,
+			   "No matches found in block %u", height);
+		return false;
+	}
+}
+
+/* Process buffered blocks when transitioning to ACTIVE */
+static void process_buffered_blocks(struct plugin *plugin)
+{
+	struct buffered_block *block, *next;
+	size_t count = 0;
+	size_t matches = 0;
+
+	for (block = bcli_plugin->buffered_blocks; block; block = next) {
+		next = block->next;
+
+		plugin_log(plugin, LOG_DBG,
+			   "Processing buffered block %u: %s",
+			   block->height, block->hash);
+
+		if (filter_and_send_block(plugin, block->height, block->hash, block->raw_block))
+			matches++;
+
+		count++;
+		tal_free(block);
+	}
+
+	bcli_plugin->buffered_blocks = NULL;
+	bcli_plugin->buffered_blocks_tail = NULL;
+
+	if (count > 0) {
+		plugin_log(plugin, LOG_INFORM,
+			   "Processed %zu buffered blocks (%zu with matches)", count, matches);
+	}
+}
+
+/* Helper: Remove a scriptpubkey watch from the hash table
+ * Returns true if found and removed, false otherwise */
+static bool remove_scriptpubkey_watch(const u8 *scriptpubkey)
+{
+	struct scriptpubkey_watch *watch;
+
+	watch = scriptpubkey_watch_hash_get(bcli_plugin->watches->scriptpubkey_watches,
+					    scriptpubkey);
+	if (!watch)
+		return false;
+
+	scriptpubkey_watch_hash_del(bcli_plugin->watches->scriptpubkey_watches, watch);
+	tal_free(watch->scriptpubkey);
+	tal_free(watch);
+	return true;
+}
+
+/* Helper: Remove a txid watch from the hash table
+ * Returns true if found and removed, false otherwise */
+static bool remove_txid_watch(const struct bitcoin_txid *txid)
+{
+	struct txid_watch *watch;
+
+	watch = txid_watch_hash_get(bcli_plugin->watches->txid_watches, txid);
+	if (!watch)
+		return false;
+
+	txid_watch_hash_del(bcli_plugin->watches->txid_watches, watch);
+	tal_free(watch);
+	return true;
+}
+
+/* Helper: Remove an outpoint watch from the hash table
+ * Returns true if found and removed, false otherwise */
+static bool remove_outpoint_watch(const struct bitcoin_txid *txid, u32 vout)
+{
+	struct outpoint_watch *watch;
+	struct bitcoin_outpoint outpoint;
+
+	outpoint.txid = *txid;
+	outpoint.n = vout;
+
+	watch = outpoint_watch_hash_get(bcli_plugin->watches->outpoint_watches, &outpoint);
+	if (!watch)
+		return false;
+
+	outpoint_watch_hash_del(bcli_plugin->watches->outpoint_watches, watch);
+	tal_free(watch);
+	return true;
+}
 
 /* Add the n'th arg to *args, incrementing n and keeping args of size n+1 */
 static void add_arg(const char ***args, const char *arg TAKES)
@@ -796,6 +1232,258 @@ static struct command_result *getrawblockbyheight(struct command *cmd,
 	return command_still_pending(cmd);
 }
 
+/* ============ Watch Management RPC Commands ============ */
+
+/* Register a scriptpubkey to watch for in blocks */
+static struct command_result *register_scriptpubkey_watch(struct command *cmd,
+							  const char *buf,
+							  const jsmntok_t *toks)
+{
+	u8 *scriptpubkey;
+	struct json_stream *response;
+	struct scriptpubkey_watch *watch;
+
+	if (!param(cmd, buf, toks,
+		   p_req("scriptpubkey", param_bin_from_hex, &scriptpubkey),
+		   NULL))
+		return command_param_failed();
+
+	/* Check if already exists */
+	if (scriptpubkey_watch_hash_get(bcli_plugin->watches->scriptpubkey_watches,
+					scriptpubkey)) {
+		plugin_log(cmd->plugin, LOG_DBG,
+			   "Scriptpubkey watch already registered (ignoring duplicate)");
+		response = jsonrpc_stream_success(cmd);
+		json_add_bool(response, "added", false);
+		return command_finished(cmd, response);
+	}
+
+	/* Create new watch */
+	watch = tal(bcli_plugin->watches, struct scriptpubkey_watch);
+	watch->scriptpubkey = tal_dup_talarr(watch, u8, scriptpubkey);
+
+	scriptpubkey_watch_hash_add(bcli_plugin->watches->scriptpubkey_watches, watch);
+
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "Registered scriptpubkey watch (%zu total)",
+		   scriptpubkey_watch_hash_count(bcli_plugin->watches->scriptpubkey_watches));
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_bool(response, "added", true);
+	return command_finished(cmd, response);
+}
+
+/* Register a txid to watch for in blocks
+ *
+ * This handles TWO types of txid watches:
+ * 1. Explicit watches: txids we're watching (e.g., counterparty's commitment tx)
+ * 2. Broadcast watches: txids we created and broadcast (e.g., our funding tx)
+ *
+ * From bcli's perspective, both are identical - just "match this txid in blocks".
+ * The semantic difference only matters in lightningd for callback routing.
+ */
+static struct command_result *register_txid_watch(struct command *cmd,
+						  const char *buf,
+						  const jsmntok_t *toks)
+{
+	struct bitcoin_txid *txid;
+	struct json_stream *response;
+	struct txid_watch *watch;
+
+	if (!param(cmd, buf, toks,
+		   p_req("txid", param_txid, &txid),
+		   NULL))
+		return command_param_failed();
+
+	/* Check if already exists */
+	if (txid_watch_hash_get(bcli_plugin->watches->txid_watches, txid)) {
+		plugin_log(cmd->plugin, LOG_DBG,
+			   "Txid watch already registered (ignoring duplicate)");
+		response = jsonrpc_stream_success(cmd);
+		json_add_bool(response, "added", false);
+		return command_finished(cmd, response);
+	}
+
+	/* Create new watch */
+	watch = tal(bcli_plugin->watches, struct txid_watch);
+	watch->txid = *txid;
+
+	txid_watch_hash_add(bcli_plugin->watches->txid_watches, watch);
+
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "Registered txid watch %s (%zu total)",
+		   fmt_bitcoin_txid(tmpctx, txid),
+		   txid_watch_hash_count(bcli_plugin->watches->txid_watches));
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_bool(response, "added", true);
+	return command_finished(cmd, response);
+}
+
+/* Register an outpoint to watch for spends in blocks */
+static struct command_result *register_outpoint_watch(struct command *cmd,
+						      const char *buf,
+						      const jsmntok_t *toks)
+{
+	struct bitcoin_txid *txid;
+	u32 *vout;
+	struct json_stream *response;
+	struct outpoint_watch *watch;
+	struct bitcoin_outpoint outpoint;
+
+	if (!param(cmd, buf, toks,
+		   p_req("txid", param_txid, &txid),
+		   p_req("vout", param_number, &vout),
+		   NULL))
+		return command_param_failed();
+
+	outpoint.txid = *txid;
+	outpoint.n = *vout;
+
+	/* Check if already exists */
+	if (outpoint_watch_hash_get(bcli_plugin->watches->outpoint_watches, &outpoint)) {
+		plugin_log(cmd->plugin, LOG_DBG,
+			   "Outpoint watch already registered (ignoring duplicate)");
+		response = jsonrpc_stream_success(cmd);
+		json_add_bool(response, "added", false);
+		return command_finished(cmd, response);
+	}
+
+	/* Create new watch */
+	watch = tal(bcli_plugin->watches, struct outpoint_watch);
+	watch->outpoint = outpoint;
+
+	outpoint_watch_hash_add(bcli_plugin->watches->outpoint_watches, watch);
+
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "Registered outpoint watch %s:%u (%zu total)",
+		   fmt_bitcoin_txid(tmpctx, txid), *vout,
+		   outpoint_watch_hash_count(bcli_plugin->watches->outpoint_watches));
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_bool(response, "added", true);
+	return command_finished(cmd, response);
+}
+
+/* Signal that initial watch synchronization is complete */
+static struct command_result *watch_sync_complete(struct command *cmd,
+						  const char *buf UNUSED,
+						  const jsmntok_t *toks UNUSED)
+{
+	struct json_stream *response;
+	size_t scriptpubkey_count, txid_count, outpoint_count;
+
+	if (!param(cmd, buf, toks, NULL))
+		return command_param_failed();
+
+	if (bcli_plugin->state != STATE_PROVISIONAL &&
+	    bcli_plugin->state != STATE_SYNCING) {
+		plugin_log(cmd->plugin, LOG_UNUSUAL,
+			   "watch_sync_complete called in wrong state: %s",
+			   bcli_state_name(bcli_plugin->state));
+		response = jsonrpc_stream_success(cmd);
+		return command_finished(cmd, response);
+	}
+
+	/* Transition to ACTIVE - filtering enabled! */
+	bcli_plugin->state = STATE_ACTIVE;
+
+	scriptpubkey_count = scriptpubkey_watch_hash_count(bcli_plugin->watches->scriptpubkey_watches);
+	txid_count = txid_watch_hash_count(bcli_plugin->watches->txid_watches);
+	outpoint_count = outpoint_watch_hash_count(bcli_plugin->watches->outpoint_watches);
+
+	plugin_log(cmd->plugin, LOG_INFORM,
+		   "Watch sync complete! Transitioning to ACTIVE. "
+		   "Watching: %zu scriptpubkeys, %zu txids, %zu outpoints",
+		   scriptpubkey_count, txid_count, outpoint_count);
+
+	/* Process any buffered blocks now that we have watches */
+	process_buffered_blocks(cmd->plugin);
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_string(response, "state", bcli_state_name(bcli_plugin->state));
+	json_add_num(response, "scriptpubkey_watches", scriptpubkey_count);
+	json_add_num(response, "txid_watches", txid_count);
+	json_add_num(response, "outpoint_watches", outpoint_count);
+	return command_finished(cmd, response);
+}
+
+/* ============ Watch Removal RPC Commands ============ */
+
+/* Unregister a scriptpubkey watch */
+static struct command_result *unregister_scriptpubkey_watch(struct command *cmd,
+							    const char *buf,
+							    const jsmntok_t *toks)
+{
+	u8 *scriptpubkey;
+	struct json_stream *response;
+
+	if (!param(cmd, buf, toks,
+		   p_req("scriptpubkey", param_bin_from_hex, &scriptpubkey),
+		   NULL))
+		return command_param_failed();
+
+	bool removed = remove_scriptpubkey_watch(scriptpubkey);
+
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "Unregistered scriptpubkey watch (removed=%d)",
+		   removed);
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_bool(response, "removed", removed);
+	return command_finished(cmd, response);
+}
+
+/* Unregister a txid watch */
+static struct command_result *unregister_txid_watch(struct command *cmd,
+						    const char *buf,
+						    const jsmntok_t *toks)
+{
+	struct bitcoin_txid *txid;
+	struct json_stream *response;
+
+	if (!param(cmd, buf, toks,
+		   p_req("txid", param_txid, &txid),
+		   NULL))
+		return command_param_failed();
+
+	bool removed = remove_txid_watch(txid);
+
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "Unregistered txid watch %s (removed=%d)",
+		   fmt_bitcoin_txid(tmpctx, txid), removed);
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_bool(response, "removed", removed);
+	return command_finished(cmd, response);
+}
+
+/* Unregister an outpoint watch */
+static struct command_result *unregister_outpoint_watch(struct command *cmd,
+							const char *buf,
+							const jsmntok_t *toks)
+{
+	struct bitcoin_txid *txid;
+	u32 *vout;
+	struct json_stream *response;
+
+	if (!param(cmd, buf, toks,
+		   p_req("txid", param_txid, &txid),
+		   p_req("vout", param_number, &vout),
+		   NULL))
+		return command_param_failed();
+
+	bool removed = remove_outpoint_watch(txid, *vout);
+
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "Unregistered outpoint watch %s:%u (removed=%d)",
+		   fmt_bitcoin_txid(tmpctx, txid), *vout, removed);
+
+	response = jsonrpc_stream_success(cmd);
+	json_add_bool(response, "removed", removed);
+	return command_finished(cmd, response);
+}
+
 /* Get infos about the block chain.
  * Calls `getblockchaininfo` and returns headers count, blocks count,
  * the chain id, and whether this is initialblockdownload.
@@ -830,8 +1518,6 @@ static struct command_result *poll_for_new_blocks(struct command *cmd, void *plu
 /* Process getblock result and send notification with full block info */
 static struct command_result *process_getblock_for_notification(struct bitcoin_cli *bcli)
 {
-	struct json_stream *notification;
-
 	plugin_log(bcli->cmd->plugin, LOG_DBG, "process_getblock_for_notification called");
 
 	/* Only send notification if we successfully got the block */
@@ -843,27 +1529,52 @@ static struct command_result *process_getblock_for_notification(struct bitcoin_c
 		strip_trailing_whitespace(bcli->output, bcli->output_bytes);
 
 		plugin_log(bcli->cmd->plugin, LOG_INFORM,
-			   "Sending bcli_block_detected notification: height=%u hash=%s",
-			   bitcoind->pending_height, bitcoind->pending_hash);
+			   "Processing new block: height=%u hash=%s state=%s",
+			   bitcoind->pending_height, bitcoind->pending_hash,
+			   bcli_state_name(bcli_plugin->state));
 
-		notification = plugin_notification_start(tmpctx, "bcli_block_detected");
-		json_add_u32(notification, "height", bitcoind->pending_height);
-		json_add_string(notification, "hash", bitcoind->pending_hash);
-		json_add_string(notification, "block", bcli->output);
-		plugin_notification_end(bcli->cmd->plugin, notification);
+		/* Handle based on current state */
+		switch (bcli_plugin->state) {
+		case STATE_INITIALIZING:
+			/* Shouldn't happen, but treat like PROVISIONAL */
+			plugin_log(bcli->cmd->plugin, LOG_UNUSUAL,
+				   "Received block in INITIALIZING state, buffering");
+			/* Fall through */
+		case STATE_PROVISIONAL:
+		case STATE_SYNCING:
+			/* Buffer the block for later processing */
+			plugin_log(bcli->cmd->plugin, LOG_DBG,
+				   "Buffering block %u (state=%s)",
+				   bitcoind->pending_height,
+				   bcli_state_name(bcli_plugin->state));
+			buffer_block(bitcoind->pending_height,
+				     bitcoind->pending_hash,
+				     bcli->output);
+			break;
 
-		/* Update our tracking state only after successful notification */
+		case STATE_ACTIVE:
+			/* Filter and send only matching transactions */
+			plugin_log(bcli->cmd->plugin, LOG_DBG,
+				   "Filtering block %u", bitcoind->pending_height);
+			filter_and_send_block(bcli->cmd->plugin,
+					      bitcoind->pending_height,
+					      bitcoind->pending_hash,
+					      bcli->output);
+			break;
+		}
+
+		/* Update our tracking state only after successful processing */
 		bitcoind->last_height = bitcoind->pending_height;
 		tal_free(bitcoind->last_hash);
 		bitcoind->last_hash = tal_strdup(bitcoind, bitcoind->pending_hash);
 
 		plugin_log(bcli->cmd->plugin, LOG_DBG,
-			   "Notification sent and state updated");
+			   "Block processed and state updated");
 	}
 
 	/* Always reschedule the next poll */
 	bitcoind->poll_timer = global_timer(bcli->cmd->plugin,
-					    time_from_sec(10),
+					    time_from_sec(bitcoind->poll_interval),
 					    poll_for_new_blocks, bcli->cmd->plugin);
 
 	return timer_complete(bcli->cmd);
@@ -916,7 +1627,7 @@ static struct command_result *process_poll_chaintip(struct bitcoin_cli *bcli)
 
 	/* Always reschedule the next poll */
 	bitcoind->poll_timer = global_timer(cmd->plugin,
-					    time_from_sec(10),
+					    time_from_sec(bitcoind->poll_interval),
 					    poll_for_new_blocks, cmd->plugin);
 
 	return timer_complete(cmd);
@@ -1215,7 +1926,7 @@ static void wait_and_check_bitcoind(struct plugin *p)
 
 static void memleak_mark_bitcoind(struct plugin *p, struct htable *memtable)
 {
-	memleak_scan_obj(memtable, bitcoind);
+	memleak_scan_obj(memtable, bcli_plugin);
 }
 
 static const char *init(struct command *init_cmd, const char *buffer UNUSED,
@@ -1235,10 +1946,21 @@ static const char *init(struct command *init_cmd, const char *buffer UNUSED,
 	plugin_log(init_cmd->plugin, LOG_INFORM,
 		   "bitcoin-cli initialized and connected to bitcoind.");
 
+	/* Create the plugin state wrapper with proper tal parent */
+	bcli_plugin = new_bcli_plugin(init_cmd->plugin, bitcoind);
+	plugin_log(init_cmd->plugin, LOG_DBG, "BCLI: Created plugin state in %s",
+		   bcli_state_name(bcli_plugin->state));
+
+	/* Transition to PROVISIONAL state - ready to buffer blocks */
+	bcli_plugin->state = STATE_PROVISIONAL;
+	plugin_log(init_cmd->plugin, LOG_INFORM,
+		   "BCLI: Transitioned to %s - will buffer blocks until watches arrive",
+		   bcli_state_name(bcli_plugin->state));
+
 	/* Start the poll timer to check for new blocks */
 	plugin_log(init_cmd->plugin, LOG_DBG, "BCLI: Starting poll timer");
 	bitcoind->poll_timer = global_timer(init_cmd->plugin,
-					    time_from_sec(10),
+					    time_from_sec(bitcoind->poll_interval),
 					    poll_for_new_blocks,
 					    init_cmd->plugin);
 	plugin_log(init_cmd->plugin, LOG_DBG, "BCLI: Poll timer started, returning from init");
@@ -1267,39 +1989,37 @@ static const struct plugin_command commands[] = {
 		"getutxout",
 		getutxout
 	},
+	/* Watch management commands */
+	{
+		"register_scriptpubkey_watch",
+		register_scriptpubkey_watch
+	},
+	{
+		"register_txid_watch",
+		register_txid_watch
+	},
+	{
+		"register_outpoint_watch",
+		register_outpoint_watch
+	},
+	{
+		"watch_sync_complete",
+		watch_sync_complete
+	},
+	/* Watch removal commands */
+	{
+		"unregister_scriptpubkey_watch",
+		unregister_scriptpubkey_watch
+	},
+	{
+		"unregister_txid_watch",
+		unregister_txid_watch
+	},
+	{
+		"unregister_outpoint_watch",
+		unregister_outpoint_watch
+	},
 };
-
-static struct bitcoind *new_bitcoind(const tal_t *ctx)
-{
-	bitcoind = tal(ctx, struct bitcoind);
-
-	bitcoind->cli = NULL;
-	bitcoind->datadir = NULL;
-	for (size_t i = 0; i < BITCOIND_NUM_PRIO; i++) {
-		bitcoind->num_requests[i] = 0;
-		list_head_init(&bitcoind->pending[i]);
-	}
-	list_head_init(&bitcoind->current);
-	bitcoind->error_count = 0;
-	bitcoind->retry_timeout = 60;
-	bitcoind->rpcuser = NULL;
-	bitcoind->rpcpass = NULL;
-	bitcoind->rpcconnect = NULL;
-	bitcoind->rpcport = NULL;
-	/* Do not exceed retry_timeout value to avoid a bitcoind hang,
-	   although normal rpcclienttimeout default value is 900. */
-	bitcoind->rpcclienttimeout = 60;
-	bitcoind->dev_no_fake_fees = false;
-
-	/* Initialize block polling state */
-	bitcoind->last_height = 0;
-	bitcoind->last_hash = NULL;
-	bitcoind->poll_timer = NULL;
-	bitcoind->pending_height = 0;
-	bitcoind->pending_hash = NULL;
-
-	return bitcoind;
-}
 
 /* Notification topics we publish */
 static const char *notification_topics[] = {
@@ -1350,6 +2070,10 @@ int main(int argc, char *argv[])
 				  "how long to keep retrying to contact bitcoind"
 				  " before fatally exiting",
 				  u64_option, u64_jsonfmt, &bitcoind->retry_timeout),
+		    plugin_option("bitcoin-poll-interval",
+				  "int",
+				  "Seconds between blockchain polls (default 10)",
+				  u64_option, u64_jsonfmt, &bitcoind->poll_interval),
 		    plugin_option_dev("dev-no-fake-fees",
 				      "bool",
 				      "Suppress fee faking for regtest",
