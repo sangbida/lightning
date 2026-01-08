@@ -731,9 +731,12 @@ class LightningD(TailableProc):
         if not random_hsm:
             # Last 32-bytes of final part of dir -> seed.
             seed = (bytes(re.search('([^/]+)/*$', lightning_dir).group(1), encoding='utf-8') + bytes(32))[:32]
-            # Modern style is 32 zeroes then a seed phrase.
+            # Modern style is 32 zeroes then a 12-word mnemonic phrase.
             if not old_hsmsecret:
-                seed = bytes(32) + bytes(mnemonic_from_seed(seed), encoding='utf-8')
+                # Use first 16 bytes (128 bits) for 12-word mnemonic
+                entropy_128 = seed[:16]
+                mnemonic_phrase = mnemonic_from_seed(entropy_128)
+                seed = bytes(32) + bytes(mnemonic_phrase, encoding='utf-8')
 
             with open(os.path.join(lightning_dir, TEST_NETWORK, 'hsm_secret'), 'wb') as f:
                 f.write(seed)
@@ -870,6 +873,7 @@ class LightningNode(object):
                  valgrind_plugins=True,
                  executable=None,
                  bad_notifications=False,
+                 old_hsmsecret=False,
                  **kwargs):
         self.bitcoin = bitcoind
         self.executor = executor
@@ -894,6 +898,7 @@ class LightningNode(object):
             lightning_dir, bitcoindproxy=bitcoind.get_proxy(),
             port=port, random_hsm=random_hsm, node_id=node_id,
             executable=executable,
+            old_hsmsecret=old_hsmsecret,
         )
         self.cln_version = self.daemon.cln_version
 

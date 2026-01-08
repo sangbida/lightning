@@ -53,7 +53,7 @@ def test_names(node_factory, old_hsmsecret):
         # l2: 
         # l3: 
         configs = [
-            ('0278121fa2313950047990c040ff913e818fa7b12296f585ede550a265730905c2', 'STRANGETOLL' '027812l'),
+            ('0278121fa2313950047990c040ff913e818fa7b12296f585ede550a265730905c2', 'STRANGETOLL', '027812'),
             ('022d223620a359a47ff7f7ac447c85c46c923da53389221a0054c11c1e3ca31d59', 'SILENTARTIST', '022d22'),
             ('035d2b1192dfba134e10e540875d366ebc8bc353d5aa766b80c090b39c3a5d885d', 'HOPPINGFIRE', '035d2b'),
             ('0382ce59ebf18be7d84677c2e35f23294b9992ceca95491fcf8a56c6cb2d9de199', 'JUNIORFELONY', '0382ce'),
