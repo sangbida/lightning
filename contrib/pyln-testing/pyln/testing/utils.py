@@ -17,6 +17,7 @@ import json
 import logging
 import lzma
 import math
+import mnemonic
 import os
 import random
 import re
@@ -664,6 +665,14 @@ class ElementsD(BitcoinD):
         return info['unconfidential']
 
 
+def mnemonic_from_seed(seed):
+    m = mnemonic.Mnemonic('english')
+    mnem = m.to_mnemonic(seed)
+    if not m.check(mnem):
+        raise RuntimeError("Generated mnemonic failed BIP39 validation (unexpected).")
+    return mnem
+
+
 class LightningD(TailableProc):
     def __init__(
             self,
@@ -673,6 +682,7 @@ class LightningD(TailableProc):
             random_hsm=False,
             node_id=0,
             executable=None,
+            old_hsmsecret=None,
     ):
         # We handle our own version of verbose, below.
         TailableProc.__init__(self, lightning_dir, verbose=False)
@@ -714,11 +724,20 @@ class LightningD(TailableProc):
         if not os.path.exists(os.path.join(lightning_dir, TEST_NETWORK)):
             os.makedirs(os.path.join(lightning_dir, TEST_NETWORK))
 
-        # Last 32-bytes of final part of dir -> seed.
-        seed = (bytes(re.search('([^/]+)/*$', lightning_dir).group(1), encoding='utf-8') + bytes(32))[:32]
+        # BIP 39 secrets were only added in v25.12.
+        if old_hsmsecret is None:
+            old_hsmsecret = self.cln_version < "v25.12"
+
         if not random_hsm:
+            # Last 32-bytes of final part of dir -> seed.
+            seed = (bytes(re.search('([^/]+)/*$', lightning_dir).group(1), encoding='utf-8') + bytes(32))[:32]
+            # Modern style is 32 zeroes then a seed phrase.
+            if not old_hsmsecret:
+                seed = bytes(32) + bytes(mnemonic_from_seed(seed), encoding='utf-8')
+
             with open(os.path.join(lightning_dir, TEST_NETWORK, 'hsm_secret'), 'wb') as f:
                 f.write(seed)
+
         self.opts['dev-fast-gossip'] = None
         self.opts['dev-bitcoind-poll'] = 1
         self.prefix = 'lightningd-%d' % (node_id)
@@ -1689,6 +1708,7 @@ class NodeFactory(object):
             'allow_bad_gossip',
             'start',
             'gossip_store_file',
+            'old_hsmsecret',
         ]
         node_opts = {k: v for k, v in opts.items() if k in node_opt_keys}
         cli_opts = {k: v for k, v in opts.items() if k not in node_opt_keys}
