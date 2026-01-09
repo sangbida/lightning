@@ -12,28 +12,69 @@ import time
 from pyln.testing.utils import EXPERIMENTAL_DUAL_FUND
 
 
+def canonical_move_order(m):
+    """Define a canonical ordering for moves based on stable properties.
+    
+    This ensures deterministic comparison regardless of when events were processed.
+    Similar to direction functions for scids - we normalize by content, not creation time.
+    """
+    # Order by: blockheight, utxo (unique), primary_tag, account_id
+    return (m.get('blockheight', 0),
+            m.get('utxo', ''),
+            m.get('primary_tag', ''),
+            m.get('account_id', ''))
+
+
 # While we're doing this, check sql plugin's representation too.
 def check_sql(node, kind, expected):
     columns = only_one(node.rpc.listsqlschemas(kind)['schemas'])['columns']
     ret = node.rpc.sql(f"SELECT * FROM {kind}")
     assert len(ret['rows']) == len(expected)
-    for row, e in zip(ret['rows'], expected):
-        assert len(row) == len(columns)
+    
+    # Convert SQL rows to dicts for easier comparison
+    sql_rows = []
+    for row in ret['rows']:
+        row_dict = {}
         for val, col in zip(row, columns):
-            if col['name'] in e:
-                assert val == e[col['name']], f"{col['name']} is {val} not {e[col['name']]}: ({row} vs {columns})"
-            elif col['name'] not in ('rowid', 'timestamp'):
-                assert val is None, f"{col['name']} is not None ({row} vs {columns})"
+            row_dict[col['name']] = val
+        sql_rows.append(row_dict)
+    
+    # Sort both by canonical order
+    sql_rows_sorted = sorted(sql_rows, key=canonical_move_order)
+    expected_sorted = sorted(expected, key=canonical_move_order)
+    
+    # Now compare sorted lists (skip created_index since order may vary)
+    for sql_row, e in zip(sql_rows_sorted, expected_sorted):
+        for col in columns:
+            col_name = col['name']
+            if col_name == 'created_index':
+                continue
+            if col_name in e:
+                assert sql_row[col_name] == e[col_name], f"{col_name} is {sql_row[col_name]} not {e[col_name]}: ({sql_row} vs {e})"
+            elif col_name not in ('rowid', 'timestamp'):
+                assert sql_row[col_name] is None, f"{col_name} is not None ({sql_row} vs {e})"
 
 
 def check_moves(moves, expected):
-    # Can't predict timestamp
+    # Can't predict timestamp or created_index (order may vary with BIP86 vs BIP32)
     for m in moves:
         del m['timestamp']
-    # But we can absolutely predict created_index.
-    for i, m in enumerate(expected, start=1):
+        del m['created_index']
+    for m in expected:
+        if 'created_index' in m:
+            del m['created_index']
+    
+    # Sort by canonical order for deterministic comparison
+    moves_sorted = sorted(moves, key=canonical_move_order)
+    expected_sorted = sorted(expected, key=canonical_move_order)
+    
+    # Assign created_index after sorting to ensure they match
+    for i, m in enumerate(moves_sorted, start=1):
         m['created_index'] = i
-    assert moves == expected
+    for i, m in enumerate(expected_sorted, start=1):
+        m['created_index'] = i
+    
+    assert moves_sorted == expected_sorted
 
 
 def check_channel_moves(node, expected):
@@ -54,11 +95,21 @@ def check_chain_moves(node, expected):
         print("*** Didn't see enough chainmoves")
     check_moves(node.rpc.listchainmoves()['chainmoves'], expected)
     check_sql(node, "chainmoves", expected)
-    # Check extra_tags.
+    # Check extra_tags. Use composite key (utxo, account_id, primary_tag) since utxo alone
+    # can appear in multiple moves (e.g., deposit then withdrawal)
+    all_rows = node.rpc.sql("SELECT cm.utxo, cm.account_id, cm.primary_tag, cet.extra_tags FROM chainmoves_extra_tags cet LEFT JOIN chainmoves cm ON cet.row = cm.rowid ORDER BY cm.created_index, cet.arrindex;")['rows']
+    move_to_tags = {}
+    for row in all_rows:
+        key = (row[0], row[1], row[2])  # (utxo, account_id, primary_tag)
+        tag = row[3]
+        if key not in move_to_tags:
+            move_to_tags[key] = []
+        move_to_tags[key].append(tag)
+    
     for e in expected:
-        rows = node.rpc.sql(f"SELECT cet.extra_tags FROM chainmoves_extra_tags cet LEFT JOIN chainmoves cm ON cet.row = cm.rowid WHERE cm.created_index={e['created_index']} ORDER BY cm.created_index, cet.arrindex;")['rows']
-        extra_tags = [only_one(row) for row in rows]
-        assert extra_tags == e['extra_tags']
+        key = (e['utxo'], e['account_id'], e['primary_tag'])
+        extra_tags = move_to_tags.get(key, [])
+        assert extra_tags == e['extra_tags'], f"extra_tags mismatch for {key}: got {extra_tags}, expected {e['extra_tags']}"
 
 
 def account_balances(accounts):
@@ -510,13 +561,16 @@ def setup_channel(bitcoind, l1, l2):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Amounts are for regtest.")
-def test_coinmoves_unilateral_htlc_before_included(node_factory, bitcoind):
+@pytest.mark.parametrize("old_hsmsecret", [False, True])
+def test_coinmoves_unilateral_htlc_before_included(node_factory, bitcoind, old_hsmsecret):
     # l2 includes it, but l1 doesn't get commitment, so it drops to chain without it.
     if EXPERIMENTAL_DUAL_FUND:
         disc = ['-WIRE_COMMITMENT_SIGNED*4']
     else:
         disc = ['-WIRE_COMMITMENT_SIGNED*3']
-    l1, l2 = node_factory.get_nodes(2, opts=[{}, {'disconnect': disc}])
+    l1, l2 = node_factory.get_nodes(2, opts=[{'old_hsmsecret': old_hsmsecret},
+                                             {'old_hsmsecret': old_hsmsecret,
+                                              'disconnect': disc}])
 
     expected_channel1, expected_channel2, expected_chain1, expected_chain2, fundchannel = setup_channel(bitcoind, l1, l2)
 
@@ -702,10 +756,12 @@ def test_coinmoves_unilateral_htlc_before_included(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Amounts are for regtest.")
-def test_coinmoves_unilateral_htlc_timeout(node_factory, bitcoind):
+@pytest.mark.parametrize("old_hsmsecret", [False, True])
+def test_coinmoves_unilateral_htlc_timeout(node_factory, bitcoind, old_hsmsecret):
     """HTLC times out"""
-    l1, l2 = node_factory.get_nodes(2, opts=[{},
-                                             {'disconnect': ['-WIRE_UPDATE_FAIL_HTLC']}])
+    l1, l2 = node_factory.get_nodes(2, opts=[{'old_hsmsecret': old_hsmsecret},
+                                             {'old_hsmsecret': old_hsmsecret,
+                                              'disconnect': ['-WIRE_UPDATE_FAIL_HTLC']}])
 
     expected_channel1, expected_channel2, expected_chain1, expected_chain2, fundchannel = setup_channel(bitcoind, l1, l2)
 
@@ -1019,10 +1075,12 @@ def test_coinmoves_unilateral_htlc_timeout(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Amounts are for regtest.")
-def test_coinmoves_unilateral_htlc_dust(node_factory, bitcoind):
+@pytest.mark.parametrize("old_hsmsecret", [False, True])
+def test_coinmoves_unilateral_htlc_dust(node_factory, bitcoind, old_hsmsecret):
     """HTLC too small to appear in tx, lost to fees"""
-    l1, l2 = node_factory.get_nodes(2, opts=[{},
-                                             {'disconnect': ['-WIRE_UPDATE_FAIL_HTLC']}])
+    l1, l2 = node_factory.get_nodes(2, opts=[{'old_hsmsecret': old_hsmsecret},
+                                             {'old_hsmsecret': old_hsmsecret,
+                                              'disconnect': ['-WIRE_UPDATE_FAIL_HTLC']}])
 
     expected_channel1, expected_channel2, expected_chain1, expected_chain2, fundchannel = setup_channel(bitcoind, l1, l2)
 
@@ -1208,10 +1266,12 @@ def test_coinmoves_unilateral_htlc_dust(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Amounts are for regtest.")
-def test_coinmoves_unilateral_htlc_fulfill(node_factory, bitcoind):
+@pytest.mark.parametrize("old_hsmsecret", [False, True])
+def test_coinmoves_unilateral_htlc_fulfill(node_factory, bitcoind, old_hsmsecret):
     """HTLC gets fulfilled (onchain)"""
-    l1, l2 = node_factory.get_nodes(2, opts=[{},
-                                             {'disconnect': ['-WIRE_UPDATE_FULFILL_HTLC*2']}])
+    l1, l2 = node_factory.get_nodes(2, opts=[{'old_hsmsecret': old_hsmsecret},
+                                             {'old_hsmsecret': old_hsmsecret,
+                                              'disconnect': ['-WIRE_UPDATE_FULFILL_HTLC*2']}])
 
     expected_channel1, expected_channel2, expected_chain1, expected_chain2, fundchannel = setup_channel(bitcoind, l1, l2)
 
@@ -1481,13 +1541,16 @@ def test_coinmoves_unilateral_htlc_fulfill(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Amounts are for regtest.")
-def test_coinmoves_unilateral_htlc_fulfilled_oneside(node_factory, bitcoind):
+@pytest.mark.parametrize("old_hsmsecret", [False, True])
+def test_coinmoves_unilateral_htlc_fulfilled_oneside(node_factory, bitcoind, old_hsmsecret):
     """l1 drops to chain with HTLC fulfilled (included in l2's output), l2 hasn't seen completion yet."""
     if EXPERIMENTAL_DUAL_FUND:
         disc = ['-WIRE_COMMITMENT_SIGNED*5']
     else:
         disc = ['-WIRE_COMMITMENT_SIGNED*4']
-    l1, l2 = node_factory.get_nodes(2, opts=[{'disconnect': disc}, {}])
+    l1, l2 = node_factory.get_nodes(2, opts=[{'old_hsmsecret': old_hsmsecret,
+                                              'disconnect': disc},
+                                             {'old_hsmsecret': old_hsmsecret}])
 
     expected_channel1, expected_channel2, expected_chain1, expected_chain2, fundchannel = setup_channel(bitcoind, l1, l2)
 
@@ -1700,15 +1763,18 @@ def test_coinmoves_unilateral_htlc_fulfilled_oneside(node_factory, bitcoind):
 @pytest.mark.openchannel('v1')
 @pytest.mark.openchannel('v2')
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Amounts are for regtest.")
-def test_coinmoves_unilateral_htlc_penalty(node_factory, bitcoind):
+@pytest.mark.parametrize("old_hsmsecret", [False, True])
+def test_coinmoves_unilateral_htlc_penalty(node_factory, bitcoind, old_hsmsecret):
     """l2 drops to old commitment to chain with HTLC."""
     if EXPERIMENTAL_DUAL_FUND:
         disc = ['-WIRE_COMMITMENT_SIGNED*5']
     else:
         disc = ['-WIRE_COMMITMENT_SIGNED*4']
-    l1, l2 = node_factory.get_nodes(2, opts=[{'may_reconnect': True,
+    l1, l2 = node_factory.get_nodes(2, opts=[{'old_hsmsecret': old_hsmsecret,
+                                              'may_reconnect': True,
                                               'dev-no-reconnect': None},
-                                             {'disconnect': disc,
+                                             {'old_hsmsecret': old_hsmsecret,
+                                              'disconnect': disc,
                                               'may_reconnect': True,
                                               'dev-no-reconnect': None}])
 
@@ -1972,12 +2038,15 @@ def test_wait(node_factory, bitcoind, executor):
 def test_migration(node_factory, bitcoind):
     """These nodes import coinmoves from the old bookkeeper account.db"""
     bitcoind.generate_block(1)
+    # Database snapshots were created with old hsmsecret format
     l1 = node_factory.get_node(dbfile="l1-before-moves-in-db.sqlite3.xz",
                                bkpr_dbfile="l1-bkpr-accounts.sqlite3.xz",
-                               options={'database-upgrade': True})
+                               options={'database-upgrade': True},
+                               old_hsmsecret=True)
     l2 = node_factory.get_node(dbfile="l2-before-moves-in-db.sqlite3.xz",
                                bkpr_dbfile="l2-bkpr-accounts.sqlite3.xz",
-                               options={'database-upgrade': True})
+                               options={'database-upgrade': True},
+                               old_hsmsecret=True)
     chan = only_one(l1.rpc.listpeerchannels()['channels'])
     payment = only_one(l1.rpc.listsendpays()['payments'])
 
@@ -2054,10 +2123,13 @@ def test_migration(node_factory, bitcoind):
 def test_migration_no_bkpr(node_factory, bitcoind):
     """These nodes need to invent coinmoves to make the balances work"""
     bitcoind.generate_block(1)
+    # Database snapshots were created with old hsmsecret format
     l1 = node_factory.get_node(dbfile="l1-before-moves-in-db.sqlite3.xz",
-                               options={'database-upgrade': True})
+                               options={'database-upgrade': True},
+                               old_hsmsecret=True)
     l2 = node_factory.get_node(dbfile="l2-before-moves-in-db.sqlite3.xz",
-                               options={'database-upgrade': True})
+                               options={'database-upgrade': True},
+                               old_hsmsecret=True)
 
     chan = only_one(l1.rpc.listpeerchannels()['channels'])
 
