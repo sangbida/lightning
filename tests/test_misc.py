@@ -2398,7 +2398,7 @@ def test_bitcoind_feerate_floor(node_factory, bitcoind, anchors):
 
 @unittest.skipIf(TEST_NETWORK != 'regtest', "Addresses are network specific")
 def test_dev_force_bip32_seed(node_factory):
-    l1 = node_factory.get_node(options={'dev-force-bip32-seed': '0000000000000000000000000000000000000000000000000000000000000001'})
+    l1 = node_factory.get_node(old_hsmsecret=True, options={'dev-force-bip32-seed': '0000000000000000000000000000000000000000000000000000000000000001'})
     # First is m/0/0/1 ..
     bech32 = l1.rpc.newaddr('bech32')['bech32']
     assert bech32 == "bcrt1qsdzqt93xsyewdjvagndw9523m27e52er5ca7hm"
@@ -2983,7 +2983,7 @@ def test_makesecret(node_factory):
     l1 = node_factory.get_node(options={"dev-force-privkey": "1212121212121212121212121212121212121212121212121212121212121212"})
     secret = l1.rpc.makesecret("73636220736563726574")["secret"]
 
-    assert (secret == "a9a2e742405c28f059349132923a99337ae7f71168b7485496e3365f5bc664ed")
+    assert (secret == "498a16a6c6b82b7280de7f5b0afa0478b29d3a1cbe52c376249cf46abb6c03da")
 
     # Same if we do it by parameter name
     assert l1.rpc.makesecret(hex="73636220736563726574")["secret"] == secret
@@ -3040,7 +3040,8 @@ def test_emergencyrecover_old_format_handling(node_factory, bitcoind):
     """
     Test test_emergencyrecover_old_format_handling
     """
-    l1 = node_factory.get_node()
+    # Use old_hsmsecret because the encrypted data was created with the old HSM secret
+    l1 = node_factory.get_node(old_hsmsecret=True)
 
     encrypted_data = (
         "4e90ed80be3ddf666967ecdebc296cb0ec9f9f2e1adf3b1ef359d74ae40dd152"
@@ -3797,8 +3798,9 @@ def test_getlog(node_factory):
 def test_log_filter(node_factory):
     """Test the log-level option with subsystem filters"""
     # This actually suppresses debug!
-    l1 = node_factory.get_node(options={'log-level': ['debug', 'broken:022d223620']})
-    l2 = node_factory.get_node(start=False)
+    l1 = node_factory.get_node(options={'log-level': ['debug', 'broken:022d223620']},
+                               old_hsmsecret=True)
+    l2 = node_factory.get_node(start=False, old_hsmsecret=True)
 
     log1 = os.path.join(l2.daemon.lightning_dir, "log")
     log2 = os.path.join(l2.daemon.lightning_dir, "log2")
@@ -4964,8 +4966,9 @@ def test_listaddresses(node_factory):
     # Check all fields are present in the response
     addresses = l1.rpc.listaddresses(address=addr[0])["addresses"]
     assert addresses[0]['keyidx'] == 1
-    assert addresses[0]['bech32'] == 'bcrt1qq8adjz4u6enf0cjey9j8yt0y490tact93fzgsf'
-    assert addresses[0]['p2tr'] == 'bcrt1pjaazqg6qgqpv2wxgdpg8hyj49wehrfgajqe2tyuzhcp7p50hachq7tkdxf'
+    # With BIP86, addresses are different from BIP32
+    assert addresses[0]['p2tr'] == 'bcrt1ph9gd3vrxqv5c43lhz330n6u497utuqzzjwtrwj89wy879z6nwrpseaf4et'
+    assert addresses[0]['bech32'] == 'bcrt1qufr4lmec5a8humz7anckxk092uel83r2eqr33s'
 
     # start > 10 (issued addresses till now)
     addresses = l1.rpc.listaddresses(start=11, limit=2)["addresses"]
