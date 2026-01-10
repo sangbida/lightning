@@ -4659,21 +4659,21 @@ def test_recover_command(node_factory, bitcoind):
     with pytest.raises(RpcError, match='Node has already issued bitcoin addresses'):
         l2.rpc.check('recover', hsmsecret=l1codex32)
 
-    # Now try recovering using hex secret (remove old prerecover!)
+    # Now try recovering again (remove old prerecover!)
     shutil.rmtree(os.path.join(l1.daemon.lightning_dir, TEST_NETWORK,
                                f"lightning.pre-recover.{pid}"))
 
     # l1 already has --recover in cmdline: recovering again would add it
     # twice!
     with pytest.raises(RpcError, match='Already doing recover'):
-        l1.rpc.check('recover', hsmsecret=l1hex)
+        l1.rpc.check('recover', hsmsecret=l1codex32)
 
     with pytest.raises(RpcError, match='Already doing recover'):
-        l1.rpc.recover(hsmsecret=l1hex)
+        l1.rpc.recover(hsmsecret=l1codex32)
 
     l1.restart()
-    assert l1.rpc.check('recover', hsmsecret=l1hex) == {'command_to_check': 'recover'}
-    l1.rpc.recover(hsmsecret=l1hex)
+    assert l1.rpc.check('recover', hsmsecret=l1codex32) == {'command_to_check': 'recover'}
+    l1.rpc.recover(hsmsecret=l1codex32)
     l1.daemon.wait_for_log("Server started with public key")
     assert l1.rpc.getinfo()['id'] == l1oldid
 
