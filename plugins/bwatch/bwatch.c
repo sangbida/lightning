@@ -406,6 +406,40 @@ static void add_watch_to_hash(struct bwatch *bwatch, struct watch *w)
 		break;
 	}
 }
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+/* Get a watch from the appropriate hash table by key */
+static struct watch *get_watch(struct bwatch *bwatch, const struct watch *key)
+{
+	switch (key->type) {
+	case WATCH_SCRIPTPUBKEY:
+		return scriptpubkey_watch_hash_get(bwatch->scriptpubkey_watches, &key->key.scriptpubkey);
+	case WATCH_OUTPOINT:
+		return outpoint_watch_hash_get(bwatch->outpoint_watches, &key->key.outpoint);
+	case WATCH_TXID:
+		return txid_watch_hash_get(bwatch->txid_watches, &key->key.txid);
+	}
+	abort();
+}
+
+
+/* Remove a watch from its hash table */
+static void remove_watch_from_hash(struct bwatch *bwatch, struct watch *w)
+{
+	switch (w->type) {
+	case WATCH_SCRIPTPUBKEY:
+		scriptpubkey_watch_hash_del(bwatch->scriptpubkey_watches, w);
+		return;
+	case WATCH_OUTPOINT:
+		outpoint_watch_hash_del(bwatch->outpoint_watches, w);
+		return;
+	case WATCH_TXID:
+		txid_watch_hash_del(bwatch->txid_watches, w);
+		return;
+	}
+	abort();
+}
+#pragma GCC diagnostic pop
 
 /* Load watches from datastore by type */
 static void load_watches_by_type(struct command *cmd, struct bwatch *bwatch,
@@ -450,28 +484,6 @@ static void load_watches_by_type(struct command *cmd, struct bwatch *bwatch,
 		   count, watch_type_name);
 }
 
-/* ==== HASH TABLE OPERATIONS ==== */
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-/* Remove a watch from its hash table */
-static void remove_watch_from_hash(struct bwatch *bwatch, struct watch *w)
-{
-	switch (w->type) {
-	case WATCH_SCRIPTPUBKEY:
-		scriptpubkey_watch_hash_del(bwatch->scriptpubkey_watches, w);
-		return;
-	case WATCH_OUTPOINT:
-		outpoint_watch_hash_del(bwatch->outpoint_watches, w);
-		return;
-	case WATCH_TXID:
-		txid_watch_hash_del(bwatch->txid_watches, w);
-		return;
-	}
-	abort();
-}
-#pragma GCC diagnostic pop
-
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-function"
 /* Save watch to datastore (converts to wire format) */
@@ -491,58 +503,11 @@ static void save_watch_to_datastore(struct command *cmd, const struct watch *w)
 }
 #pragma GCC diagnostic pop
 
-static const char *init(struct command *cmd,
-			const char *buf UNUSED,
-			const jsmntok_t *config UNUSED)
-{
-	struct bwatch *bwatch = bwatch_of(cmd->plugin);
-
-	bwatch->plugin = cmd->plugin;
-
-	/* Initialize watch storage */
-	bwatch->scriptpubkey_watches = tal(bwatch, struct scriptpubkey_watch_hash);
-	bwatch->outpoint_watches = tal(bwatch, struct outpoint_watch_hash);
-	bwatch->txid_watches = tal(bwatch, struct txid_watch_hash);
-
-	scriptpubkey_watch_hash_init(bwatch->scriptpubkey_watches);
-	outpoint_watch_hash_init(bwatch->outpoint_watches);
-	txid_watch_hash_init(bwatch->txid_watches);
-
-	/* Initialize block history */
-	bwatch->block_history = tal_arr(bwatch, struct block_record_wire *, 0);
-
-	/* Load block history from datastore */
-	load_block_history(cmd, bwatch);
-
-	/* If no history, initialize to zero (will be set on first poll) */
-	if (tal_count(bwatch->block_history) == 0) {
-		bwatch->current_height = 0;
-		memset(&bwatch->current_blockhash, 0, sizeof(bwatch->current_blockhash));
-	}
-
-	/* Restore watches from datastore */
-	load_watches_by_type(cmd, bwatch, WATCH_SCRIPTPUBKEY);
-	load_watches_by_type(cmd, bwatch, WATCH_OUTPOINT);
-	load_watches_by_type(cmd, bwatch, WATCH_TXID);
-
-	/* Set poll interval (30 seconds default) */
-	bwatch->poll_interval = 30;
-
-	/* Start polling - will catch up naturally with proper reorg handling */
-	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(1), poll_chain, NULL);
-	
-	plugin_log(bwatch->plugin, LOG_INFORM, "bwatch plugin initialized");
-	return NULL;
-}
-
 /*
  * ============================================================================
  * BLOCK PROCESSING: Polling
  * ============================================================================
  */
-
-/* Forward declarations */
-static struct command_result *poll_chain(struct command *cmd, void *unused);
 
 /* ==== BLOCK FETCHING AND PARSING ==== */
 
@@ -582,8 +547,9 @@ static struct command_result *fetch_block_handle(struct command *cmd,
 	return send_outreq(req);
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
+/* Forward declarations for chain polling */
+static struct command_result *poll_chain(struct command *cmd, void *unused);
+
 /* Parse getchaininfo response, returns true on success */
 static bool parse_getchaininfo(const char *buf,
 			       const jsmntok_t *result,
@@ -990,7 +956,50 @@ static struct command_result *poll_chain(struct command *cmd, void *unused)
 	json_add_u32(req->js, "last_height", bwatch->current_height);
 	return send_outreq(req);
 }
-#pragma GCC diagnostic pop
+
+static const char *init(struct command *cmd,
+			const char *buf UNUSED,
+			const jsmntok_t *config UNUSED)
+{
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
+
+	bwatch->plugin = cmd->plugin;
+
+	/* Initialize watch storage */
+	bwatch->scriptpubkey_watches = tal(bwatch, struct scriptpubkey_watch_hash);
+	bwatch->outpoint_watches = tal(bwatch, struct outpoint_watch_hash);
+	bwatch->txid_watches = tal(bwatch, struct txid_watch_hash);
+
+	scriptpubkey_watch_hash_init(bwatch->scriptpubkey_watches);
+	outpoint_watch_hash_init(bwatch->outpoint_watches);
+	txid_watch_hash_init(bwatch->txid_watches);
+
+	/* Initialize block history */
+	bwatch->block_history = tal_arr(bwatch, struct block_record_wire *, 0);
+
+	/* Load block history from datastore */
+	load_block_history(cmd, bwatch);
+
+	/* If no history, initialize to zero (will be set on first poll) */
+	if (tal_count(bwatch->block_history) == 0) {
+		bwatch->current_height = 0;
+		memset(&bwatch->current_blockhash, 0, sizeof(bwatch->current_blockhash));
+	}
+
+	/* Restore watches from datastore */
+	load_watches_by_type(cmd, bwatch, WATCH_SCRIPTPUBKEY);
+	load_watches_by_type(cmd, bwatch, WATCH_OUTPOINT);
+	load_watches_by_type(cmd, bwatch, WATCH_TXID);
+
+	/* Set poll interval (30 seconds default) */
+	bwatch->poll_interval = 30;
+
+	/* Start polling - will catch up naturally with proper reorg handling */
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(1), poll_chain, NULL);
+	
+	plugin_log(bwatch->plugin, LOG_INFORM, "bwatch plugin initialized");
+	return NULL;
+}
 
 int main(int argc, char *argv[])
 {
