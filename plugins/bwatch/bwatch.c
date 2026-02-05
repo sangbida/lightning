@@ -429,7 +429,6 @@ static struct watch *get_watch(struct bwatch *bwatch, const struct watch *key)
 	abort();
 }
 
-
 /* Remove a watch from its hash table */
 static void remove_watch_from_hash(struct bwatch *bwatch, struct watch *w)
 {
@@ -1025,8 +1024,6 @@ static struct command_result *rescan_block_done(struct command *cmd,
 	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 }
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
 /* Start scanning historical blocks.
  * If w is NULL, rescans all watches; otherwise rescans only that watch.
  * Rescan state is tied to command lifetime. */
@@ -1051,7 +1048,126 @@ static void start_rescan(struct command *cmd,
 
 	fetch_block_rescan(cmd, rescan->current_block, rescan_block_done, rescan);
 }
-#pragma GCC diagnostic pop
+
+/* Forward declaration */
+static void save_watch_to_datastore(struct command *cmd, const struct watch *w);
+
+/* Add or update a watch. Takes ownership of template if new watch created.
+ * Returns the watch if rescan is needed, NULL otherwise. */
+static struct watch *add_watch(struct command *cmd,
+			       struct bwatch *bwatch,
+			       struct watch *template,
+			       u32 start_block,
+			       const char *owner_id)
+{
+	struct watch *w = get_watch(bwatch, template);
+
+	if (!w) {
+		/* Take ownership of template */
+		w = tal_steal(bwatch, template);
+		w->start_block = start_block;
+		add_watch_to_hash(bwatch, w);
+	}
+
+	/* Check if this owner already exists */
+	for (size_t i = 0; i < tal_count(w->owners); i++) {
+		if (streq(w->owners[i], owner_id)) {
+			plugin_log(cmd->plugin, LOG_UNUSUAL,
+				   "Owner %s already watching", owner_id);
+			return NULL;
+		}
+	}
+
+	if (start_block < w->start_block)
+		w->start_block = start_block;
+
+	tal_arr_expand(&w->owners, tal_strdup(w->owners, owner_id));
+	save_watch_to_datastore(cmd, w);
+
+	if (bwatch->current_height > 0 && start_block <= bwatch->current_height)
+		return w;
+	return NULL;
+}
+
+/* Parse watch type from string. Returns -1 on failure. */
+static int parse_watch_type(const char *type_str)
+{
+	if (streq(type_str, "scriptpubkey"))
+		return WATCH_SCRIPTPUBKEY;
+	if (streq(type_str, "outpoint"))
+		return WATCH_OUTPOINT;
+	if (streq(type_str, "txid"))
+		return WATCH_TXID;
+	return -1;
+}
+
+/* RPC command: addwatch */
+static struct command_result *json_bwatch_add(struct command *cmd,
+					      const char *buffer,
+					      const jsmntok_t *params)
+{
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
+	const char *type_str, *owner;
+	u32 *start_block;
+	u8 *scriptpubkey;
+	struct bitcoin_outpoint *outpoint;
+	struct bitcoin_txid *txid;
+	struct watch *w = NULL;
+	int type;
+
+	if (!param(cmd, buffer, params,
+		   p_req("owner", param_string, &owner),
+		   p_req("type", param_string, &type_str),
+		   p_opt("outpoint", param_outpoint, &outpoint),
+		   p_opt("scriptpubkey", param_bin_from_hex, &scriptpubkey),
+		   p_opt_def("start_block", param_u32, &start_block, 0),
+		   p_opt("txid", param_txid, &txid),
+		   NULL))
+		return command_param_failed();
+
+	type = parse_watch_type(type_str);
+	if (type < 0)
+		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+				    "type must be 'scriptpubkey', 'outpoint', or 'txid'");
+
+	/* Create template watch with the appropriate key field */
+	struct watch *template = tal(cmd, struct watch);
+	template->type = type;
+	template->start_block = UINT32_MAX;
+	template->owners = tal_arr(template, wirestring *, 0);
+
+	switch (type) {
+	case WATCH_SCRIPTPUBKEY:
+		if (!scriptpubkey)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "scriptpubkey required for type 'scriptpubkey'");
+		template->key.scriptpubkey.len = tal_bytelen(scriptpubkey);
+		template->key.scriptpubkey.script = tal_steal(template, scriptpubkey);
+		break;
+	case WATCH_OUTPOINT:
+		if (!outpoint)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "outpoint required for type 'outpoint'");
+		template->key.outpoint = *outpoint;
+		break;
+	case WATCH_TXID:
+		if (!txid)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "txid required for type 'txid'");
+		template->key.txid = *txid;
+		break;
+	}
+
+	w = add_watch(cmd, bwatch, template, *start_block, owner);
+
+	if (w) {
+		/* Rescan needed - command completes when rescan finishes */
+		start_rescan(cmd, w, *start_block, bwatch->current_height);
+		return command_still_pending(cmd);
+	}
+
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
 
 static const char *init(struct command *cmd,
 			const char *buf UNUSED,
@@ -1097,6 +1213,13 @@ static const char *init(struct command *cmd,
 	return NULL;
 }
 
+static const struct plugin_command commands[] = {
+	{
+		"addwatch",
+		json_bwatch_add,
+	},
+};
+
 int main(int argc, char *argv[])
 {
 	struct bwatch *bwatch;
@@ -1104,7 +1227,7 @@ int main(int argc, char *argv[])
 	setup_locale();
 	bwatch = tal(NULL, struct bwatch);
 	plugin_main(argv, init, take(bwatch), PLUGIN_RESTARTABLE, true, NULL,
-		    NULL, 0,  /* commands */
+		    commands, ARRAY_SIZE(commands),
 		    NULL, 0,  /* notifications */
 		    NULL, 0,  /* hooks */
 		    NULL, 0,  /* notification topics */
