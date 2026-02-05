@@ -244,10 +244,8 @@ static void load_block_history(struct command *cmd, struct bwatch *bwatch)
 		if (!data)
 			continue;
 
-		size_t datalen = tal_bytelen(data);
 		struct block_record_wire *br = tal(bwatch, struct block_record_wire);
-		const u8 *cursor = data;
-		if (!fromwire_bwatch_block(&cursor, &datalen, br))
+		if (!fromwire_bwatch_block(data, br))
 			continue;
 
 		tal_arr_expand(&bwatch->block_history, br);
@@ -393,8 +391,6 @@ static struct watch *watch_from_wire(const tal_t *ctx, const struct watch_wire *
 
 /* ==== HASH TABLE OPERATIONS ==== */
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
 /* Add watch to appropriate hash table */
 static void add_watch_to_hash(struct bwatch *bwatch, struct watch *w)
 {
@@ -411,6 +407,53 @@ static void add_watch_to_hash(struct bwatch *bwatch, struct watch *w)
 	}
 }
 
+/* Load watches from datastore by type */
+static void load_watches_by_type(struct command *cmd, struct bwatch *bwatch,
+				 enum watch_type type)
+{
+	const char *watch_type_name = get_watch_type_name(type);
+	struct json_out *params = json_out_new(tmpctx);
+	const jsmntok_t *result;
+	const char *buf;
+	const jsmntok_t *datastore, *t;
+	size_t i, count = 0;
+
+	json_out_start(params, NULL, '{');
+	json_out_start(params, "key", '[');
+	json_out_addstr(params, NULL, "bwatch");
+	json_out_addstr(params, NULL, watch_type_name);
+	json_out_end(params, ']');
+	json_out_end(params, '}');
+
+	result = jsonrpc_request_sync(tmpctx, cmd, "listdatastore", params, &buf);
+	datastore = json_get_member(buf, result, "datastore");
+
+	json_for_each_arr(i, t, datastore) {
+		const u8 *data = json_tok_bin_from_hex(tmpctx, buf,
+						       json_get_member(buf, t, "hex"));
+		if (!data)
+			continue;
+
+		struct watch_wire *wire;
+		if (!fromwire_bwatch_watch(tmpctx, data, &wire))
+			continue;
+
+		struct watch *w = watch_from_wire(bwatch, wire);
+		if (!w || w->type != type)
+			continue;
+
+		add_watch_to_hash(bwatch, w);
+		count++;
+	}
+
+	plugin_log(cmd->plugin, LOG_DBG, "Restored %zu %s from datastore",
+		   count, watch_type_name);
+}
+
+/* ==== HASH TABLE OPERATIONS ==== */
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 /* Remove a watch from its hash table */
 static void remove_watch_from_hash(struct bwatch *bwatch, struct watch *w)
 {
@@ -476,6 +519,17 @@ static const char *init(struct command *cmd,
 		bwatch->current_height = 0;
 		memset(&bwatch->current_blockhash, 0, sizeof(bwatch->current_blockhash));
 	}
+
+	/* Restore watches from datastore */
+	load_watches_by_type(cmd, bwatch, WATCH_SCRIPTPUBKEY);
+	load_watches_by_type(cmd, bwatch, WATCH_OUTPOINT);
+	load_watches_by_type(cmd, bwatch, WATCH_TXID);
+
+	/* Set poll interval (30 seconds default) */
+	bwatch->poll_interval = 30;
+
+	/* Start polling - will catch up naturally with proper reorg handling */
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(1), poll_chain, NULL);
 	
 	plugin_log(bwatch->plugin, LOG_INFORM, "bwatch plugin initialized");
 	return NULL;
