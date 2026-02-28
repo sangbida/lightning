@@ -4,6 +4,7 @@
 #include <common/json_command.h>
 #include <lightningd/channel.h>
 #include <lightningd/coin_mvts.h>
+#include <lightningd/watchman.h>
 #include <lightningd/notification.h>
 
 
@@ -107,7 +108,7 @@ void send_account_balance_snapshot(struct lightningd *ld)
 	struct peer *p;
 	struct peer_node_id_map_iter it;
 
-	snap->blockheight = get_block_height(ld->topology);
+	snap->blockheight = get_block_height(ld);
 	snap->timestamp = coinmvt_current_time();
 	snap->node_id = &ld->our_nodeid;
 

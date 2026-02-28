@@ -25,6 +25,7 @@
 #include <lightningd/dual_open_control.h>
 #include <lightningd/feerate.h>
 #include <lightningd/hsm_control.h>
+#include <lightningd/watchman.h>
 #include <lightningd/notification.h>
 #include <lightningd/opening_common.h>
 #include <lightningd/peer_control.h>
@@ -1452,7 +1453,7 @@ wallet_commit_channel(struct lightningd *ld,
 
 	/* If we're fundee, could be a little before this
 	 * in theory, but it's only used for timing out. */
-	channel->first_blocknum = get_block_height(ld->topology);
+	channel->first_blocknum = get_block_height(ld);
 
 	/* Update lease info for channel */
 	channel->blockheight_states = new_height_states(channel,
@@ -1624,14 +1625,9 @@ static void handle_tx_broadcast(struct channel_send *cs)
 	struct command *cmd = channel->openchannel_signed_cmd;
 	struct json_stream *response;
 	struct bitcoin_txid txid;
-	int num_utxos;
 
 	/* This might have spent UTXOs from our wallet */
-	num_utxos = wallet_extract_owned_outputs(ld->wallet,
-						 /* FIXME: what txindex? */
-						 wtx, false, NULL);
-	if (num_utxos)
-		wallet_transaction_add(ld->wallet, wtx, 0, 0);
+	wallet_extract_owned_outputs(ld->wallet, wtx, false, NULL);
 
 	if (cmd) {
 		response = json_stream_success(cmd);
@@ -1702,7 +1698,7 @@ static void sendfunding_done(struct bitcoind *bitcoind UNUSED,
 		 * that the broadcast would fail. Verify that's not
 		 * the case here. */
 		cs->err_msg = tal_strdup(cs, msg);
-		bitcoind_getutxout(cs, ld->topology->bitcoind,
+		bitcoind_getutxout(cs, ld->bitcoind,
 				   &channel->funding,
 				   check_utxo_block,
 				   cs);
@@ -1738,8 +1734,8 @@ static void send_funding_tx(struct channel *channel,
 		  fmt_channel_id(tmpctx, &channel->cid),
 		  fmt_wally_tx(tmpctx, cs->wtx));
 
-	bitcoind_sendrawtx(ld->topology->bitcoind,
-			   ld->topology->bitcoind,
+	bitcoind_sendrawtx(ld->bitcoind,
+			   ld->bitcoind,
 			   channel->open_attempt
 			   ? (channel->open_attempt->cmd
 			      ? channel->open_attempt->cmd->id
@@ -2066,7 +2062,7 @@ static void accepter_got_offer(struct subd *dualopend,
 	 * the plugin */
 	payload->feerate_our_min = feerate_min(dualopend->ld, NULL);
 	payload->feerate_our_max = feerate_max(dualopend->ld, NULL);
-	payload->node_blockheight = get_block_height(dualopend->ld->topology);
+	payload->node_blockheight = get_block_height(dualopend->ld);
 
 	if (feature_negotiated(dualopend->ld->our_features,
 			       channel->peer->their_features,
@@ -2484,13 +2480,6 @@ static struct command_result *openchannel_bump(struct openchannel_bump_info *inf
 	return command_still_pending(cmd);
 }
 
-/* sync_waiter must return void, so we use a simple wrapper */
-static void openchannel_bump_after_sync(struct chain_topology *topo,
-					struct openchannel_bump_info *info)
-{
-	openchannel_bump(info);
-}
-
 static struct command_result *
 json_openchannel_bump(struct command *cmd,
 		      const char *buffer,
@@ -2620,18 +2609,9 @@ json_openchannel_bump(struct command *cmd,
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
 
-	/* Ok, we're kosher to start.  Delay if not synced yet. */
-	if (!topology_synced(cmd->ld->topology)) {
-		json_notify_fmt(cmd, LOG_UNUSUAL,
-				"Waiting to sync with bitcoind network (block %u of %u)",
-				get_block_height(cmd->ld->topology),
-				get_network_blockheight(cmd->ld->topology));
-
-		topology_add_sync_waiter(cmd, cmd->ld->topology,
-					 openchannel_bump_after_sync,
-					 info);
-		return command_still_pending(cmd);
-	}
+	if (!cmd->ld->bitcoind->synced)
+		return command_fail(cmd, FUNDING_STILL_SYNCING_BITCOIN,
+				    "Still syncing with bitcoin network");
 
 	return openchannel_bump(info);
 }
@@ -2817,7 +2797,7 @@ static void validate_input_unspent(struct bitcoind *bitcoind,
 		pv->next_index = i + 1;
 
 		/* Confirm input is in a block */
-		bitcoind_getutxout(pv, pv->channel->owner->ld->topology->bitcoind,
+		bitcoind_getutxout(pv, pv->channel->owner->ld->bitcoind,
 				   &outpoint,
 				   validate_input_unspent,
 				   pv);
@@ -2987,7 +2967,7 @@ static struct command_result *init_set_feerate(struct command *cmd,
 {
 	if (!*feerate_per_kw_funding) {
 		*feerate_per_kw_funding = tal(cmd, u32);
-		**feerate_per_kw_funding = opening_feerate(cmd->ld->topology);
+		**feerate_per_kw_funding = opening_feerate(cmd->ld);
 		if (!**feerate_per_kw_funding)
 			return command_fail(cmd, LIGHTNINGD,
 					    "`funding_feerate` not specified and fee "
@@ -3067,12 +3047,12 @@ static struct command_result *openchannel_init(struct command *cmd,
 					   oa->our_upfront_shutdown_script,
 					   our_upfront_shutdown_script_wallet_index,
 					   feerate_per_kw,
-					   unilateral_feerate(cmd->ld->topology, true),
+					   unilateral_feerate(cmd->ld, true),
 					   feerate_per_kw_funding,
 					   channel->channel_flags,
 					   amount_sat_is_zero(request_amt) ?
 						NULL : &request_amt,
-					   get_block_height(cmd->ld->topology),
+					   get_block_height(cmd->ld),
 					   false,
 					   ctype,
 					   rates);
@@ -3108,37 +3088,6 @@ struct openchannel_init_info {
 	struct lease_rates *rates;
 	struct channel_type *ctype;
 };
-
-static void openchannel_init_after_sync(struct chain_topology *topo,
-					struct openchannel_init_info *info)
-{
-	struct peer *peer;
-
-	/* Look up peer again in case it's gone! */
-	peer = peer_by_id(info->cmd->ld, info->id);
-	if (!peer) {
-		was_pending(command_fail(info->cmd, FUNDING_UNKNOWN_PEER, "Unknown peer"));
-		return;
-	}
-
-	if (!feature_negotiated(info->cmd->ld->our_features,
-			        peer->their_features,
-				OPT_DUAL_FUND)) {
-		was_pending(command_fail(info->cmd, FUNDING_V2_NOT_SUPPORTED,
-					 "v2 openchannel not supported "
-					 "by peer"));
-		return;
-	}
-
-	openchannel_init(info->cmd, peer,
-			 *info->amount,
-			 *info->request_amt,
-			 info->psbt,
-			 *info->feerate_per_kw_funding, *info->feerate_per_kw,
-			 info->our_upfront_shutdown_script,
-			 *info->announce_channel,
-			 info->rates, info->ctype);
-}
 
 static struct command_result *json_openchannel_init(struct command *cmd,
 						    const char *buffer,
@@ -3254,17 +3203,9 @@ static struct command_result *json_openchannel_init(struct command *cmd,
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
 
-	if (!topology_synced(cmd->ld->topology)) {
-		json_notify_fmt(cmd, LOG_UNUSUAL,
-				"Waiting to sync with bitcoind network (block %u of %u)",
-				get_block_height(cmd->ld->topology),
-				get_network_blockheight(cmd->ld->topology));
-
-		topology_add_sync_waiter(cmd, cmd->ld->topology,
-					 openchannel_init_after_sync,
-					 info);
-		return command_still_pending(cmd);
-	}
+	if (!cmd->ld->bitcoind->synced)
+		return command_fail(cmd, FUNDING_STILL_SYNCING_BITCOIN,
+				    "Still syncing with bitcoin network");
 
 	return openchannel_init(cmd, peer,
 				*info->amount,
@@ -3865,12 +3806,12 @@ static struct command_result *json_queryrates(struct command *cmd,
 					   oa->our_upfront_shutdown_script,
 					   our_upfront_shutdown_script_wallet_index,
 					   *feerate_per_kw,
-					   unilateral_feerate(cmd->ld->topology, true),
+					   unilateral_feerate(cmd->ld, true),
 					   *feerate_per_kw_funding,
 					   channel->channel_flags,
 					   amount_sat_is_zero(*request_amt) ?
 						NULL : request_amt,
-					   get_block_height(cmd->ld->topology),
+					   get_block_height(cmd->ld),
 					   true,
 					   desired_channel_type(tmpctx, cmd->ld->our_features,
 								peer->their_features),

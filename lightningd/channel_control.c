@@ -17,7 +17,9 @@
 #include <lightningd/closing_control.h>
 #include <lightningd/connect_control.h>
 #include <lightningd/dual_open_control.h>
+#include <lightningd/broadcast.h>
 #include <lightningd/feerate.h>
+#include <lightningd/watchman.h>
 #include <lightningd/hsm_control.h>
 #include <lightningd/notification.h>
 #include <lightningd/peer_fd.h>
@@ -51,7 +53,7 @@ void channel_update_feerates(struct lightningd *ld, const struct channel *channe
 	u8 *msg;
 	u32 min_feerate, max_feerate;
 	bool anchors = channel_type_has_anchors(channel->type);
-	u32 feerate = unilateral_feerate(ld->topology, anchors);
+	u32 feerate = unilateral_feerate(ld, anchors);
 
 	/* Nothing to do if we don't know feerate. */
 	if (!feerate)
@@ -59,7 +61,7 @@ void channel_update_feerates(struct lightningd *ld, const struct channel *channe
 
 	/* For anchors, we just need the commitment tx to relay. */
 	if (anchors)
-		min_feerate = get_feerate_floor(ld->topology);
+		min_feerate = get_feerate_floor(ld);
 	else
 		min_feerate = feerate_min(ld, NULL);
 	max_feerate = feerate_max(ld, NULL);
@@ -81,12 +83,12 @@ void channel_update_feerates(struct lightningd *ld, const struct channel *channe
 		  feerate,
 		  min_feerate,
 		  feerate_max(ld, NULL),
-		  penalty_feerate(ld->topology));
+		  penalty_feerate(ld));
 
 	msg = towire_channeld_feerates(NULL, feerate,
 				       min_feerate,
 				       max_feerate,
-				       penalty_feerate(ld->topology));
+				       penalty_feerate(ld));
 	subd_send_msg(channel->owner, take(msg));
 }
 
@@ -111,7 +113,7 @@ static void try_update_feerates(struct lightningd *ld, struct channel *channel)
 static void try_update_blockheight(struct lightningd *ld,
 				   struct channel *channel)
 {
-	u32 blockheight = get_block_height(ld->topology);
+	u32 blockheight = get_block_height(ld);
 	u8 *msg;
 
 	/* We don't update the blockheight for non-leased chans */
@@ -121,7 +123,7 @@ static void try_update_blockheight(struct lightningd *ld,
 	log_debug(channel->log, "attempting update blockheight %s",
 		  fmt_channel_id(tmpctx, &channel->cid));
 
-	if (!topology_synced(ld->topology)) {
+	if (!ld->bitcoind->synced) {
 		log_debug(channel->log, "chain not synced,"
 			  " not updating blockheight");
 		return;
@@ -496,17 +498,14 @@ static void handle_tx_broadcast(struct send_splice_info *info)
 	struct json_stream *response;
 	struct bitcoin_txid txid;
 	u8 *tx_bytes;
-	int num_utxos;
 
 	tx_bytes = linearize_tx(tmpctx, info->final_tx);
 	bitcoin_txid(info->final_tx, &txid);
 
 	/* This might have spent UTXOs from our wallet */
-	num_utxos = wallet_extract_owned_outputs(ld->wallet,
-						 info->final_tx->wtx, false,
-						 NULL);
-	if (num_utxos)
-		wallet_transaction_add(ld->wallet, info->final_tx->wtx, 0, 0);
+	wallet_extract_owned_outputs(ld->wallet,
+				     info->final_tx->wtx, false,
+				     NULL);
 
 	if (info->cc) {
 		response = json_stream_success(info->cc->cmd);
@@ -568,7 +567,7 @@ static void send_splice_tx_done(struct bitcoind *bitcoind UNUSED,
 
 	if (!success) {
 		info->err_msg = tal_strdup(info, msg);
-		bitcoind_getutxout(info, ld->topology->bitcoind, &outpoint,
+		bitcoind_getutxout(info, ld->bitcoind, &outpoint,
 				   check_utxo_block, info);
 	} else {
 		handle_tx_broadcast(info);
@@ -600,8 +599,8 @@ static void send_splice_tx(struct channel *channel,
 	info->err_msg = NULL;
 	info->psbt = psbt;
 
-	bitcoind_sendrawtx(ld->topology->bitcoind,
-			   ld->topology->bitcoind,
+	bitcoind_sendrawtx(ld->bitcoind,
+			   ld->bitcoind,
 			   cc ? cc->cmd->id : NULL,
 			   tal_hex(tmpctx, tx_bytes),
 			   false,
@@ -1715,7 +1714,7 @@ bool peer_start_channeld(struct channel *channel,
 
 	/* For anchors, we just need the commitment tx to relay. */
 	if (channel_type_has_anchors(channel->type))
-		min_feerate = get_feerate_floor(ld->topology);
+		min_feerate = get_feerate_floor(ld);
 	else
 		min_feerate = feerate_min(ld, NULL);
 	max_feerate = feerate_max(ld, NULL);
@@ -1726,7 +1725,7 @@ bool peer_start_channeld(struct channel *channel,
 	}
 
 	/* Make sure we don't go backsards on blockheights */
-	curr_blockheight = get_block_height(ld->topology);
+	curr_blockheight = get_block_height(ld);
 	if (curr_blockheight < get_blockheight(channel->blockheight_states,
 					       channel->opener, LOCAL)) {
 
@@ -1738,7 +1737,7 @@ bool peer_start_channeld(struct channel *channel,
 			  " last saved (%d). setting to last saved. %s",
 			  curr_blockheight,
 			  last_height,
-			  !topology_synced(ld->topology) ? "(not synced)" : "");
+			  !ld->bitcoind->synced ? "(not synced)" : "");
 
 		curr_blockheight = last_height;
 	}
@@ -1793,7 +1792,7 @@ bool peer_start_channeld(struct channel *channel,
 				       channel->fee_states,
 				       min_feerate,
 				       max_feerate,
-				       penalty_feerate(ld->topology),
+				       penalty_feerate(ld),
 				       &channel->last_sig,
 				       &channel->channel_info.remote_fundingkey,
 				       &channel->channel_info.theirbase,
@@ -1916,7 +1915,7 @@ static bool
 is_fundee_should_forget(struct lightningd *ld,
 			struct channel *channel)
 {
-	u32 block_height = get_block_height(ld->topology);
+	u32 block_height = get_block_height(ld);
 	/* 2016 by default */
 	u32 max_funding_unconfirmed = ld->dev_max_funding_unconfirmed;
 
@@ -2022,7 +2021,7 @@ void channel_notify_new_block(struct lightningd *ld)
 			    "confirmed. "
 			    "We are fundee and can forget channel without "
 			    "loss of funds.",
-			    get_block_height(ld->topology) - channel->first_blocknum,
+			    get_block_height(ld) - channel->first_blocknum,
 			    fmt_bitcoin_txid(tmpctx, &channel->funding.txid));
 		/* FIXME: Send an error packet for this case! */
 		/* And forget it. COMPLETELY. */
@@ -2142,7 +2141,7 @@ struct command_result *cancel_channel_before_broadcast(struct command *cmd,
 	 * the funding transaction isn't broadcast. We can't know if the funding
 	 * is broadcast by external wallet and the transaction hasn't
 	 * been onchain. */
-	bitcoind_getutxout(cc, cmd->ld->topology->bitcoind,
+	bitcoind_getutxout(cc, cmd->ld->bitcoind,
 			   &cancel_channel->funding,
 			   process_check_funding_broadcast,
 			   /* Freed by callback */
@@ -2244,7 +2243,7 @@ static struct command_result *json_splice_init(struct command *cmd,
 
 	if (!feerate_per_kw) {
 		feerate_per_kw = tal(cmd, u32);
-		*feerate_per_kw = opening_feerate(cmd->ld->topology);
+		*feerate_per_kw = opening_feerate(cmd->ld);
 	}
 
 	if (!initialpsbt)
@@ -2615,7 +2614,7 @@ static struct command_result *json_dev_feerate(struct command *cmd,
 	msg = towire_channeld_feerates(NULL, *feerate,
 				       feerate_min(cmd->ld, NULL),
 				       feerate_max(cmd->ld, NULL),
-				       penalty_feerate(cmd->ld->topology));
+				       penalty_feerate(cmd->ld));
 	subd_send_msg(channel->owner, take(msg));
 
 	response = json_stream_success(cmd);

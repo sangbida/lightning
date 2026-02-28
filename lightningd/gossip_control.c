@@ -8,7 +8,7 @@
 #include <common/amount.h>
 #include <common/json_command.h>
 #include <connectd/connectd_wiregen.h>
-#include <lightningd/chaintopology.h>
+#include <lightningd/feerate.h>
 #include <lightningd/channel.h>
 #include <lightningd/channel_gossip.h>
 #include <lightningd/gossip_control.h>
@@ -33,7 +33,7 @@ static void get_txout(struct subd *gossip, const u8 *msg)
 	 * gossip_scid_watch_found replies to gossipd. Bwatch deduplicates
 	 * if already watching, and rescans from start_block for past blocks. */
 	blockheight = short_channel_id_blocknum(scid);
-	start_block = watchman_get_height(gossip->ld);
+	start_block = get_block_height(gossip->ld);
 	if (blockheight < start_block)
 		start_block = blockheight;
 	watchman_watch_scid(gossip->ld,
@@ -230,19 +230,13 @@ void gossip_scid_watch_found(struct lightningd *ld,
 
 void gossip_notify_new_block(struct lightningd *ld)
 {
-	u32 blockheight = get_block_height(ld->topology);
+	u32 blockheight = get_block_height(ld);
 
-	/* Only notify gossipd once we're synced. */
-	if (!topology_synced(ld->topology))
+	/* Only notify gossipd once bitcoind is synced. */
+	if (!ld->bitcoind->synced)
 		return;
 
 	gossip_notify_blockheight(ld, blockheight);
-}
-
-static void gossip_topology_synced(struct chain_topology *topo, void *unused)
-{
-	/* Now we start telling gossipd about blocks. */
-	gossip_notify_new_block(topo->ld);
 }
 
 /* We make sure gossipd is started before plugins (which may want gossip_map) */
@@ -257,11 +251,6 @@ static void gossipd_init_done(struct subd *gossipd,
 	 * might have lost its gossip_store. */
 	channel_gossip_init_done(ld);
 
-	/* Closures are now handled by bwatch: WATCH_SCID fires
-	 * gossip_scid_watch_found on confirmation, which auto-creates
-	 * a WATCH_OUTPOINT. When the funding is spent, the same handler
-	 * calls gossipd_notify_spends. Watches are persistent, so no
-	 * replay needed. */
 
 	/* Break out of loop, so we can begin */
 	log_debug(gossipd->ld->log, "io_break: %s", __func__);
@@ -280,10 +269,6 @@ void gossip_init(struct lightningd *ld, int connectd_fd)
 				     take(&connectd_fd), NULL);
 	if (!ld->gossip)
 		err(1, "Could not subdaemon gossip");
-
-	/* We haven't started topology yet, so tell us when we're synced. */
-	topology_add_sync_waiter(ld->gossip, ld->topology,
-				 gossip_topology_synced, NULL);
 
 	msg = towire_gossipd_init(
 	    NULL,

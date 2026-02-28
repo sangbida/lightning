@@ -41,7 +41,7 @@ void bitcoind_sendrawtx_(const tal_t *ctx UNNEEDED,
 { fprintf(stderr, "bitcoind_sendrawtx_ called!\n"); abort(); }
 /* Generated stub for broadcast_tx_ */
 void broadcast_tx_(const tal_t *ctx UNNEEDED,
-		   struct chain_topology *topo UNNEEDED,
+		   struct lightningd *ld UNNEEDED,
 		   struct channel *channel UNNEEDED,
 		   const struct bitcoin_tx *tx TAKES UNNEEDED,
 		   const char *cmd_id UNNEEDED, bool allowhighfees UNNEEDED, u32 minblock UNNEEDED,
@@ -326,7 +326,7 @@ bool fromwire_onchaind_dev_memleak_reply(const void *p UNNEEDED, bool *leak UNNE
 bool fromwire_openingd_dev_memleak_reply(const void *p UNNEEDED, bool *leak UNNEEDED)
 { fprintf(stderr, "fromwire_openingd_dev_memleak_reply called!\n"); abort(); }
 /* Generated stub for get_block_height */
-u32 get_block_height(const struct chain_topology *topo UNNEEDED)
+u32 get_block_height(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "get_block_height called!\n"); abort(); }
 /* Generated stub for hash_cid */
 size_t hash_cid(const struct channel_id *cid UNNEEDED)
@@ -738,9 +738,6 @@ void wallet_transaction_add(struct wallet *w UNNEEDED, const struct wally_tx *tx
 /* Generated stub for wallet_transaction_height */
 u32 wallet_transaction_height(struct wallet *w UNNEEDED, const struct bitcoin_txid *txid UNNEEDED)
 { fprintf(stderr, "wallet_transaction_height called!\n"); abort(); }
-/* Generated stub for watchman_get_height */
-u32 watchman_get_height(struct lightningd *ld UNNEEDED)
-{ fprintf(stderr, "watchman_get_height called!\n"); abort(); }
 /* Generated stub for watchman_unwatch_outpoint */
 void watchman_unwatch_outpoint(struct lightningd *ld UNNEEDED,
 			       const char *owner UNNEEDED,

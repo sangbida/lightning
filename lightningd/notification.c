@@ -553,25 +553,6 @@ void notify_balance_snapshot(struct lightningd *ld,
 	notify_send(ld, n);
 }
 
-static void block_added_notification_serialize(struct json_stream *stream,
-					       const struct block *block)
-{
-	json_add_string(stream, "hash",
-			fmt_bitcoin_blkid(tmpctx, &block->blkid));
-	json_add_u32(stream, "height", block->height);
-}
-REGISTER_NOTIFICATION(block_added);
-
-void notify_block_added(struct lightningd *ld,
-			const struct block *block)
-{
-	struct jsonrpc_notification *n = notify_start(ld, "block_added");
-	if (!n)
-		return;
-	block_added_notification_serialize(n->stream, block);
-	notify_send(ld, n);
-}
-
 static void openchannel_peer_sigs_serialize(struct json_stream *stream,
 					    const struct channel_id *cid,
 					    const struct wally_psbt *psbt)

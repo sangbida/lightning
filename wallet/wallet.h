@@ -42,10 +42,6 @@ struct wallet {
 	struct invoices *invoices;
 	u64 max_channel_dbid;
 
-	/* Filter matching all outpoints corresponding to our owned outputs,
-	 * including all spent ones */
-	struct outpointfilter *owned_outpoints;
-
 	/* Our issued wallet addresses.  We update on lookup. */
 	u32 our_addresses_maxindex;
 	struct wallet_address_htable *our_addresses;
@@ -768,25 +764,6 @@ void wallet_channel_stats_incr_out_offered(struct wallet *w, u64 cdbid, struct a
 void wallet_channel_stats_incr_out_fulfilled(struct wallet *w, u64 cdbid, struct amount_msat msatoshi);
 
 /**
- * Retrieve the blockheight of the last block processed by lightningd.
- *
- * Will return the 0 if the wallet was never used before.
- *
- * @w: wallet to load from.
- */
-u32 wallet_blocks_maxheight(struct wallet *w);
-
-/**
- * Retrieve the blockheight of the first block processed by lightningd (ignoring
- * backfilled blocks for gossip).
- *
- * Will return the 0 if the wallet was never used before.
- *
- * @w: wallet to load from.
- */
-u32 wallet_blocks_contig_minheight(struct wallet *w);
-
-/**
  * wallet_extract_owned_outputs - given a tx, extract all of our outputs
  */
 int wallet_extract_owned_outputs(struct wallet *w, const struct wally_tx *tx,
@@ -1165,21 +1142,6 @@ void wallet_htlc_sigs_add(struct wallet *w, u64 channel_id,
  * Returns false if the checks failed.
  */
 bool wallet_sanity_check(struct wallet *w);
-
-
-/**
- * Return whether we have a block for the given height.
- */
-bool wallet_have_block(struct wallet *w, u32 blockheight);
-
-/**
- * Check whether an outpoint is in our wallet's owned output set.
- *
- * @return true if found in our wallet's output set, false otherwise
- */
-bool wallet_outpoint_spend(const tal_t *ctx, struct wallet *w,
-			   const u32 blockheight,
-			   const struct bitcoin_outpoint *outpoint);
 
 void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
 			    const u32 blockheight, const u32 txindex);

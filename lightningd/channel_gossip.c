@@ -7,7 +7,7 @@
 #include <common/wire_error.h>
 #include <connectd/connectd_wiregen.h>
 #include <hsmd/hsmd_wiregen.h>
-#include <lightningd/chaintopology.h>
+#include <lightningd/watchman.h>
 #include <lightningd/channel.h>
 #include <lightningd/channel_gossip.h>
 #include <lightningd/gossip_generation.h>
@@ -233,7 +233,7 @@ static bool has_matching_peer_sigs(const struct channel *channel)
 
 static bool has_announce_depth(const struct channel *channel)
 {
-	u32 block_height = get_block_height(channel->peer->ld->topology);
+	u32 block_height = get_block_height(channel->peer->ld);
 
 	if (!has_matching_peer_sigs(channel))
 		return false;

@@ -12,8 +12,11 @@ void bwatch_send_watch_found(struct command *cmd,
 			     u32 txindex,
 			     u32 index);
 
-/* Send block_processed notification to watchman */
+/* Send block_processed notification to watchman (fetches feerates first) */
 void bwatch_send_block_processed(struct command *cmd, u32 blockheight);
+
+/* Send chaininfo (chain name, IBD status, sync) to watchman */
+void bwatch_send_chaininfo(struct command *cmd);
 
 /* Sync with watchman height on startup */
 struct command_result *bwatch_sync_with_watchman(struct command *cmd, void *unused);

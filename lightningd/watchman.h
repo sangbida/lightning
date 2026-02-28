@@ -4,10 +4,24 @@
 #include "config.h"
 #include <bitcoin/short_channel_id.h>
 #include <bitcoin/tx.h>
+#include <lightningd/feerate.h>
 
 struct lightningd;
-struct watchman;
 struct bitcoin_tx;
+struct pending_op;
+
+#define FEE_HISTORY_NUM 3
+
+struct watchman {
+	struct lightningd *ld;
+	u32 last_processed_height;
+	struct pending_op **pending_ops;
+
+	/* Feerate estimation state (updated per-block via block_processed) */
+	u32 feerate_floor;
+	struct feerate_est *feerates[FEE_HISTORY_NUM];
+	struct feerate_est *smoothed_feerates;
+};
 
 /**
  * watch_found_fn - Handler for watch_found notifications
@@ -81,16 +95,6 @@ void watchman_ack(struct lightningd *ld, const char *op_id);
  * Call this when bwatch is ready (e.g., on startup).
  */
 void watchman_replay_pending(struct lightningd *ld);
-
-/**
- * watchman_get_height - Get watchman's last processed block height
- * @ld: lightningd instance
- *
- * Returns the last block height that bwatch has processed.
- * This should be used as the start_block when adding new watches
- * to avoid rescanning from genesis.
- */
-u32 watchman_get_height(struct lightningd *ld);
 
 /* Typed watch helpers — prefer these over calling watchman_add/del directly. */
 
@@ -169,5 +173,8 @@ void watchman_add_utxo(struct lightningd *ld,
 		       const u8 *script, size_t script_len,
 		       struct amount_sat sat,
 		       const char *owner);
+
+/* Get highest block number (from bwatch). */
+u32 get_block_height(struct lightningd *ld);
 
 #endif /* LIGHTNING_LIGHTNINGD_WATCHMAN_H */

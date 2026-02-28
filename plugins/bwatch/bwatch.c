@@ -367,9 +367,9 @@ static const char *init(struct command *cmd,
 	/* Restore watches from datastore */
 	bwatch_load_watches_from_datastore(cmd, bwatch);
 
-	/* Defer watchman height sync to a timer so init can complete synchronously */
+	/* Defer watchman height sync and chaininfo to a timer so init can complete synchronously */
 	global_timer(cmd->plugin, time_from_sec(0), bwatch_sync_with_watchman, NULL);
-	
+
 	return NULL; /* Success */
 }
 

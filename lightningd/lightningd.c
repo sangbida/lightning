@@ -60,7 +60,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <header_versions_gen.h>
-#include <lightningd/chaintopology.h>
+#include <lightningd/bitcoind.h>
+#include <lightningd/broadcast.h>
+#include <lightningd/feerate.h>
 #include <lightningd/channel.h>
 #include <lightningd/channel_control.h>
 #include <lightningd/channel_gossip.h>
@@ -272,8 +274,6 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->timers = tal(ld, struct timers);
 	timers_init(ld->timers, time_mono());
 
-	/*~ This is detailed in chaintopology.c */
-	ld->topology = new_topology(ld, ld->log);
 	ld->gossip_blockheight = 0;
 	ld->daemon_parent_fd = -1;
 	ld->proxyaddr = NULL;
@@ -347,6 +347,11 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	 * we allow overriding them with --force-feerates, in which
 	 * case this is a pointer to an enum feerate-indexed array of values */
 	ld->force_feerates = NULL;
+
+	/* Bitcoin backend and broadcasting */
+	ld->bitcoind = NULL;
+	ld->outgoing_txs = new_htable(ld, outgoing_tx_map);
+	ld->rebroadcast_timer = NULL;
 
 	/*~ We need some funds to help CPFP spend unilateral closes.  How
 	 * much?  But let's assume we want to boost the commitment tx (1112
@@ -681,7 +686,7 @@ static void init_wallet_scriptpubkey_watches(struct wallet *w,
 		if (bip32_key_from_parent(bip32_base, i, BIP32_FLAG_KEY_PUBLIC, &ext) != WALLY_OK) {
 			abort();
 		}
-		wallet_add_bwatch_derkey(w->ld, i, watchman_get_height(w->ld), ext.pub_key);
+		wallet_add_bwatch_derkey(w->ld, i, get_block_height(w->ld), ext.pub_key);
 	}
 
 	/* If BIP86 is enabled, also add BIP86-derived keys as watches */
@@ -690,7 +695,7 @@ static void init_wallet_scriptpubkey_watches(struct wallet *w,
 	for (u64 i = 0; i <= bip86_max_index + w->keyscan_gap; i++) {
 		struct pubkey pubkey;
 		u8 *p2tr_script, *p2wpkh_script;
-		u32 start_block = watchman_get_height(w->ld);
+		u32 start_block = get_block_height(w->ld);
 
 		bip86_pubkey(w->ld, &pubkey, i);
 		/* Add both P2TR and P2WPKH scripts since BIP86 keys can be used for both */
@@ -1367,11 +1372,8 @@ int main(int argc, char *argv[])
 	/*~ That's all of the wallet db operations for now. */
 	db_commit_transaction(ld->wallet->db);
 
-	/*~ Initialize block topology.  This does its own io_loop to
-	 * talk to bitcoind, so does its own db transactions. */
-	trace_span_start("setup_topology", ld->topology);
-	setup_topology(ld->topology);
-	trace_span_end(ld->topology);
+	ld->bitcoind = new_bitcoind(ld, ld, ld->log);
+	bitcoind_check_commands(ld->bitcoind);
 
 	db_begin_transaction(ld->wallet->db);
 	trace_span_start("delete_old_htlcs", ld->wallet);
@@ -1467,10 +1469,6 @@ int main(int argc, char *argv[])
 	 * tx. */
 	setup_peers(ld);
 
-	/*~ Now that all the notifications for transactions are in place, we
-	 *  can start the poll loop which queries bitcoind for new blocks. */
-	begin_topology(ld->topology);
-
 	/*~ To handle --daemon, we fork the daemon early (otherwise we hit
 	 * issues with our pid changing), but keep the parent around until
 	 * we've completed most initialization: that way we'll exit with an
@@ -1528,9 +1526,6 @@ stop:
 		io_close_taken_fd(ld->stop_conn);
 		stop_response = tal_steal(NULL, ld->stop_response);
 	}
-
-	/* Stop topology callbacks. */
-	stop_topology(ld->topology);
 
 	/* We're not going to collect our children. */
 	remove_sigchild_handler(sigchld_conn);

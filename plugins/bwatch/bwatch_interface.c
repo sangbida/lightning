@@ -101,14 +101,149 @@ static struct command_result *block_processed_err(struct command *cmd,
 	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 }
 
-/* Send block_processed notification to watchman */
-void bwatch_send_block_processed(struct command *cmd, u32 blockheight)
+struct block_processed_info {
+	struct command *cmd;
+	u32 blockheight;
+};
+
+static struct command_result *estimatefees_for_block_done(struct command *cmd,
+							 const char *method,
+							 const char *buf,
+							 const jsmntok_t *result,
+							 struct block_processed_info *info)
+{
+	struct out_req *req;
+	const jsmntok_t *feerates_tok, *floor_tok;
+
+	req = jsonrpc_request_start(info->cmd, "block_processed",
+				    block_processed_ack, block_processed_err, NULL);
+	json_add_u32(req->js, "blockheight", info->blockheight);
+
+	/* Forward feerate data if available */
+	floor_tok = json_get_member(buf, result, "feerate_floor");
+	feerates_tok = json_get_member(buf, result, "feerates");
+	if (floor_tok && feerates_tok) {
+		u32 floor_val;
+		json_to_number(buf, floor_tok, &floor_val);
+		json_add_u32(req->js, "feerate_floor", floor_val);
+		json_add_tok(req->js, "feerates", feerates_tok, buf);
+	}
+
+	send_outreq(req);
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
+
+static struct command_result *estimatefees_for_block_failed(struct command *cmd,
+							   const char *method UNUSED,
+							   const char *buf UNUSED,
+							   const jsmntok_t *result UNUSED,
+							   struct block_processed_info *info)
 {
 	struct out_req *req;
 
-	req = jsonrpc_request_start(cmd, "block_processed",
+	/* estimatefees failed — send block_processed without feerates */
+	plugin_log(cmd->plugin, LOG_DBG, "estimatefees failed, sending block_processed without feerates");
+	req = jsonrpc_request_start(info->cmd, "block_processed",
 				    block_processed_ack, block_processed_err, NULL);
-	json_add_u32(req->js, "blockheight", blockheight);
+	json_add_u32(req->js, "blockheight", info->blockheight);
+	send_outreq(req);
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
+
+/* Send block_processed notification to watchman, including fresh feerates */
+void bwatch_send_block_processed(struct command *cmd, u32 blockheight)
+{
+	struct out_req *req;
+	struct block_processed_info *info = tal(cmd, struct block_processed_info);
+
+	info->cmd = cmd;
+	info->blockheight = blockheight;
+
+	req = jsonrpc_request_start(cmd, "estimatefees",
+				    estimatefees_for_block_done,
+				    estimatefees_for_block_failed,
+				    info);
+	send_outreq(req);
+}
+
+/* --- chaininfo: send chain name, IBD status to watchman on init --- */
+
+static struct command_result *chaininfo_ack(struct command *cmd,
+					   const char *method UNUSED,
+					   const char *buf UNUSED,
+					   const jsmntok_t *result UNUSED,
+					   void *unused UNUSED)
+{
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
+
+static struct command_result *chaininfo_err(struct command *cmd,
+					   const char *method UNUSED,
+					   const char *buf,
+					   const jsmntok_t *result,
+					   void *unused UNUSED)
+{
+	plugin_log(cmd->plugin, LOG_DBG,
+		   "chaininfo RPC failed: %.*s",
+		   json_tok_full_len(result), json_tok_full(buf, result));
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
+
+static struct command_result *chaininfo_getchaininfo_done(struct command *cmd,
+							 const char *method UNUSED,
+							 const char *buf,
+							 const jsmntok_t *result,
+							 void *unused UNUSED)
+{
+	struct out_req *req;
+	const char *chain;
+	u32 headercount, blockcount;
+	bool ibd;
+	const char *err;
+
+	err = json_scan(tmpctx, buf, result,
+			"{chain:%,headercount:%,blockcount:%,ibd:%}",
+			JSON_SCAN_TAL(tmpctx, json_strdup, &chain),
+			JSON_SCAN(json_to_number, &headercount),
+			JSON_SCAN(json_to_number, &blockcount),
+			JSON_SCAN(json_to_bool, &ibd));
+	if (err) {
+		plugin_log(cmd->plugin, LOG_BROKEN,
+			   "getchaininfo parse failed: %s", err);
+		return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	}
+
+	req = jsonrpc_request_start(cmd, "chaininfo",
+				    chaininfo_ack, chaininfo_err, NULL);
+	json_add_string(req->js, "chain", chain);
+	json_add_u32(req->js, "headercount", headercount);
+	json_add_u32(req->js, "blockcount", blockcount);
+	json_add_bool(req->js, "ibd", ibd);
+	send_outreq(req);
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
+
+static struct command_result *chaininfo_getchaininfo_failed(struct command *cmd,
+							   const char *method UNUSED,
+							   const char *buf UNUSED,
+							   const jsmntok_t *result UNUSED,
+							   void *unused UNUSED)
+{
+	plugin_log(cmd->plugin, LOG_BROKEN,
+		   "getchaininfo failed during chaininfo init");
+	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+}
+
+void bwatch_send_chaininfo(struct command *cmd)
+{
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
+	struct out_req *req;
+
+	req = jsonrpc_request_start(cmd, "getchaininfo",
+				    chaininfo_getchaininfo_done,
+				    chaininfo_getchaininfo_failed,
+				    NULL);
+	json_add_u32(req->js, "last_height", bwatch->current_height);
 	send_outreq(req);
 }
 

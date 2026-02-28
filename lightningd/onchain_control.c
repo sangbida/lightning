@@ -11,7 +11,8 @@
 #include <hsmd/hsmd_wiregen.h>
 #include <hsmd/permissions.h>
 #include <inttypes.h>
-#include <lightningd/chaintopology.h>
+#include <lightningd/broadcast.h>
+#include <lightningd/feerate.h>
 #include <lightningd/channel.h>
 #include <lightningd/channel_control.h>
 #include <lightningd/coin_mvts.h>
@@ -21,7 +22,6 @@
 #include <lightningd/subd.h>
 #include <lightningd/watchman.h>
 #include <onchaind/onchaind_wiregen.h>
-#include <wallet/txfilter.h>
 
 /* Per-session per-channel tx tracking for onchaind.
  * Stores {txid, confirm_height, num_outputs} for each tx onchaind is watching:
@@ -366,7 +366,7 @@ void onchaind_tx_watch_found(struct lightningd *ld,
 		return;
 	}
 
-	depth = watchman_get_height(ld) - entry->blockheight + 1;
+	depth = get_block_height(ld) - entry->blockheight + 1;
 	onchain_tx_depth(channel, &txid, depth);
 }
 
@@ -538,8 +538,6 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 	}
 
 	assert(blockheight);
-	outpointfilter_add(channel->peer->ld->wallet->owned_outpoints,
-			   &outpoint);
 	log_debug(channel->log, "adding utxo to watch %s, csv %u",
 		  fmt_bitcoin_outpoint(tmpctx, &outpoint),
 		  csv_lock);
@@ -650,9 +648,9 @@ struct onchain_signing_info {
 };
 
 /* If we don't care / don't know */
-static u32 infinite_block_deadline(const struct chain_topology *topo)
+static u32 infinite_block_deadline(struct lightningd *ld)
 {
-	return get_block_height(topo) + 300;
+	return get_block_height(ld) + 300;
 }
 
 /**
@@ -665,10 +663,10 @@ static u32 infinite_block_deadline(const struct chain_topology *topo)
  * is too close, in order not to waste too many funds on the sweep
  * fees.
  */
-static u32 slow_sweep_deadline(const struct chain_topology *topo,
+static u32 slow_sweep_deadline(struct lightningd *ld,
 			       const struct channel *c)
 {
-	u32 closeheight, deadline, height = get_block_height(topo);
+	u32 closeheight, deadline, height = get_block_height(ld);
 
 	if (c->close_blockheight) {
 		closeheight = *c->close_blockheight;
@@ -907,13 +905,13 @@ static struct bitcoin_tx *onchaind_tx_unsigned(const tal_t *ctx,
 	for (;;) {
 		u32 feerate;
 
-		feerate = feerate_for_target(ld->topology, block_target);
+		feerate = feerate_for_target(ld, block_target);
 		*fee = amount_tx_fee(feerate, weight);
 
 		log_debug(channel->log,
 			  "Feerate for target %"PRIu64" (%+"PRId64" blocks) is %u, fee %s of %s",
 			  block_target,
-			  block_target - get_block_height(ld->topology),
+			  block_target - get_block_height(ld),
 			  feerate,
 			  fmt_amount_sat(tmpctx, *fee),
 			  fmt_amount_sat(tmpctx, info->out_sats));
@@ -947,8 +945,8 @@ static struct bitcoin_tx *onchaind_tx_unsigned(const tal_t *ctx,
 				    "Lowballing feerate for %s sats from %u to %u (deadline %u->%"PRIu64"):"
 				    " won't count on it being spent!",
 				    fmt_amount_sat(tmpctx, info->out_sats),
-				    feerate_for_target(ld->topology, info->deadline_block),
-				    feerate_for_target(ld->topology, block_target),
+				    feerate_for_target(ld, info->deadline_block),
+				    feerate_for_target(ld, block_target),
 				    info->deadline_block, block_target);
 		}
 	}
@@ -1079,7 +1077,7 @@ static bool consider_onchain_htlc_tx_rebroadcast(struct channel *channel,
 	 * but since that bitcoind will take the highest feerate ones, it will
 	 * priority order them for us. */
 
-	feerate = feerate_for_target(ld->topology, info->deadline_block);
+	feerate = feerate_for_target(ld, info->deadline_block);
 
 	/* Make a copy to play with */
 	newtx = clone_bitcoin_tx(tmpctx, info->raw_htlc_tx);
@@ -1093,7 +1091,7 @@ static bool consider_onchain_htlc_tx_rebroadcast(struct channel *channel,
 
 	utxos = wallet_utxo_boost(tmpctx,
 				  ld->wallet,
-				  get_block_height(ld->topology),
+				  get_block_height(ld),
 				  AMOUNT_SAT(0),
 				  bitcoin_tx_compute_fee(newtx),
 				  feerate,
@@ -1201,7 +1199,7 @@ static u32 htlc_incoming_deadline(const struct channel *channel, u64 htlc_id)
 	if (!hin) {
 		log_broken(channel->log, "No htlc IN %"PRIu64", using infinite deadline",
 			   htlc_id);
-		return infinite_block_deadline(channel->peer->ld->topology);
+		return infinite_block_deadline(channel->peer->ld);
 	}
 
 	return hin->cltv_expiry - 1;
@@ -1217,7 +1215,7 @@ static u32 htlc_outgoing_incoming_deadline(const struct channel *channel, u64 ht
 	if (!hout) {
 		log_broken(channel->log, "No htlc OUT %"PRIu64", using infinite deadline",
 			   htlc_id);
-		return infinite_block_deadline(channel->peer->ld->topology);
+		return infinite_block_deadline(channel->peer->ld);
 	}
 
 	/* If it's ours, no real pressure, but let's avoid leaking
@@ -1266,7 +1264,7 @@ static void create_onchain_tx(struct channel *channel,
 
 	/* We allow "excessive" fees, as we may be fighting with censors and
 	 * we'd rather spend fees than have our adversary win. */
-	broadcast_tx(channel, ld->topology,
+	broadcast_tx(channel, ld,
 		     channel, take(tx), NULL, true, info->minblock,
 		     NULL, consider_onchain_rebroadcast, take(info));
 
@@ -1319,7 +1317,7 @@ static void handle_onchaind_spend_to_us(struct channel *channel,
 
 	/* No real deadline on this, it's just returning to our wallet. */
 	info->deadline_block =
-	    slow_sweep_deadline(channel->peer->ld->topology, channel);
+	    slow_sweep_deadline(channel->peer->ld, channel);
 
 	/* sequence is usually channel->channel_info.their_config.to_self_delay,
 	 * but for leases it can be greater. */
@@ -1472,7 +1470,7 @@ static void handle_onchaind_spend_htlc_success(struct channel *channel,
 
 	log_debug(channel->log, "Broadcast for onchaind tx %s",
 		  fmt_bitcoin_tx(tmpctx, tx));
-	broadcast_tx(channel, channel->peer->ld->topology,
+	broadcast_tx(channel, channel->peer->ld,
 		     channel, take(tx), NULL, false,
 		     info->minblock, NULL,
 		     consider_onchain_htlc_tx_rebroadcast, take(info));
@@ -1554,7 +1552,7 @@ static void handle_onchaind_spend_htlc_timeout(struct channel *channel,
 
 	log_debug(channel->log, "Broadcast for onchaind tx %s",
 		  fmt_bitcoin_tx(tmpctx, tx));
-	broadcast_tx(channel, channel->peer->ld->topology,
+	broadcast_tx(channel, channel->peer->ld,
 		     channel, take(tx), NULL, false,
 		     info->minblock, NULL,
 		     consider_onchain_htlc_tx_rebroadcast, take(info));
@@ -1737,10 +1735,8 @@ void onchaind_funding_spent(struct channel *channel,
 
 	/* If we haven't posted the open event yet, post an open */
 	if (!channel->scid || !channel->remote_channel_ready) {
-		u32 blkh;
-		/* Blockheight will be zero if it's not in chain */
-		blkh = wallet_transaction_height(channel->peer->ld->wallet,
-						 &channel->funding.txid);
+		u32 blkh = channel->scid
+			? short_channel_id_blocknum(*channel->scid) : 0;
 		channel_record_open(channel, blkh, true);
 	}
 

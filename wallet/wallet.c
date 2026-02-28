@@ -34,7 +34,6 @@
 #include <wallet/datastore.h>
 #include <wallet/invoices.h>
 #include <wallet/migrations.h>
-#include <wallet/txfilter.h>
 #include <wallet/wallet.h>
 #include <wally_bip32.h>
 
@@ -246,16 +245,6 @@ static void our_addresses_init(struct wallet *w)
 	w->our_addresses_maxindex = w->keyscan_gap;
 }
 
-static void outpointfilters_init(struct wallet *w)
-{
-	struct utxo **utxos = wallet_get_all_utxos(NULL, w);
-
-	w->owned_outpoints = outpointfilter_new(w);
-	for (size_t i = 0; i < tal_count(utxos); i++)
-		outpointfilter_add(w->owned_outpoints, &utxos[i]->outpoint);
-
-	tal_free(utxos);
-}
 
 struct wallet *wallet_new(struct lightningd *ld, struct timers *timers)
 {
@@ -275,10 +264,6 @@ struct wallet *wallet_new(struct lightningd *ld, struct timers *timers)
 
 	trace_span_start("invoices_new", wallet);
 	wallet->invoices = invoices_new(wallet, wallet, timers);
-	trace_span_end(wallet);
-
-	trace_span_start("outpointfilters_init", wallet);
-	outpointfilters_init(wallet);
 	trace_span_end(wallet);
 
 	trace_span_start("our_addresses_init", wallet);
@@ -411,7 +396,7 @@ bool wallet_update_output_status(struct wallet *w,
 		if (oldstatus != OUTPUT_STATE_ANY && oldstatus != OUTPUT_STATE_AVAILABLE)
 			return false;
 		reservation_set(w, outpoint,
-			       watchman_get_height(w->ld) + RESERVATION_INC);
+			       get_block_height(w->ld) + RESERVATION_INC);
 		return true;
 	case OUTPUT_STATE_SPENT:
 		reservation_remove(w, outpoint);
@@ -2582,46 +2567,6 @@ void wallet_channel_stats_incr_out_fulfilled(struct wallet *w, u64 id,
 	wallet_channel_stats_incr_x(w, id, m, query);
 }
 
-u32 wallet_blocks_maxheight(struct wallet *w)
-{
-	u32 max = 0;
-	struct db_stmt *stmt = db_prepare_v2(w->db, SQL("SELECT MAX(height) FROM blocks;"));
-	db_query_prepared(stmt);
-
-	/* If we ever processed a block we'll get the latest block in the chain */
-	if (db_step(stmt)) {
-		if (!db_col_is_null(stmt, "MAX(height)")) {
-			max = db_col_int(stmt, "MAX(height)");
-		} else {
-			db_col_ignore(stmt, "MAX(height)");
-		}
-	}
-	tal_free(stmt);
-	return max;
-}
-
-u32 wallet_blocks_contig_minheight(struct wallet *w)
-{
-	u32 min = 0;
-	struct db_stmt *stmt = db_prepare_v2(w->db, SQL("SELECT MAX(b.height)"
-							"  FROM blocks b"
-							"  WHERE NOT EXISTS ("
-							"    SELECT 1"
-							"    FROM blocks b2"
-							"    WHERE b2.height = b.height - 1)"));
-	db_query_prepared(stmt);
-
-	/* If we ever processed a block we'll get the first block in
-	 * the last run of blocks */
-	if (db_step(stmt)) {
-		if (!db_col_is_null(stmt, "MAX(b.height)")) {
-			min = db_col_int(stmt, "MAX(b.height)");
-		}
-	}
-	tal_free(stmt);
-	return min;
-}
-
 static void wallet_channel_config_insert(struct wallet *w,
 					 struct channel_config *cc)
 {
@@ -3409,11 +3354,9 @@ type_ok:
 		/* our_addresses only stores ADDR_BECH32, ADDR_P2SH_SEGWIT, ADDR_P2TR */
 		assert(addrtype_str);
 		wallet_add_bwatch_scriptpubkey(w->ld, addrtype_str, keyindex,
-					      watchman_get_height(w->ld),
+					      get_block_height(w->ld),
 					      txout->script, txout->script_len);
 	}
-
-	outpointfilter_add(w->owned_outpoints, &utxo->outpoint);
 
 	wallet_annotate_txout(w, &utxo->outpoint, TX_WALLET_DEPOSIT, 0);
 	if (outpoint)
@@ -4977,16 +4920,6 @@ bool wallet_sanity_check(struct wallet *w)
 	return true;
 }
 
-
-
-bool wallet_outpoint_spend(const tal_t *ctx, struct wallet *w, const u32 blockheight,
-			   const struct bitcoin_outpoint *outpoint)
-{
-	(void)ctx;
-	(void)blockheight;
-	return outpointfilter_matches(w->owned_outpoints, outpoint);
-}
-
 void wallet_record_spend(struct lightningd *ld,
 			const struct bitcoin_outpoint *outpoint,
 			const struct bitcoin_txid *txid,
@@ -5027,72 +4960,9 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 	}
 
 	bitcoin_txid(tx, &spending_txid);
-
-	if (wallet_outpoint_spend(tmpctx, ld->wallet, blockheight, &outpoint))
-		wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
+	wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
 }
 
-bool wallet_have_block(struct wallet *w, u32 blockheight)
-{
-	bool result;
-	struct db_stmt *stmt = db_prepare_v2(
-	    w->db, SQL("SELECT height FROM blocks WHERE height = ?"));
-	db_bind_int(stmt, blockheight);
-	db_query_prepared(stmt);
-	result = db_step(stmt);
-	if (result)
-		db_col_ignore(stmt, "height");
-	tal_free(stmt);
-	return result;
-}
-
-void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
-			    const u32 blockheight, const u32 txindex)
-{
-	struct bitcoin_txid txid;
-	struct db_stmt *stmt = db_prepare_v2(
-	    w->db, SQL("SELECT blockheight FROM transactions WHERE id=?"));
-
-	wally_txid(tx, &txid);
-	db_bind_txid(stmt, &txid);
-	db_query_prepared(stmt);
-
-	if (!db_step(stmt)) {
-		tal_free(stmt);
-		/* This transaction is still unknown, insert */
-		stmt = db_prepare_v2(w->db,
-				     SQL("INSERT INTO transactions ("
-					 "  id"
-					 ", blockheight"
-					 ", txindex"
-					 ", rawtx) VALUES (?, ?, ?, ?);"));
-		db_bind_txid(stmt, &txid);
-		if (blockheight) {
-			db_bind_int(stmt, blockheight);
-			db_bind_int(stmt, txindex);
-		} else {
-			db_bind_null(stmt);
-			db_bind_null(stmt);
-		}
-		db_bind_tx(stmt, tx);
-		db_exec_prepared_v2(take(stmt));
-	} else {
-		db_col_ignore(stmt, "blockheight");
-		tal_free(stmt);
-
-		if (blockheight) {
-			/* We know about the transaction, update */
-			stmt = db_prepare_v2(w->db,
-					     SQL("UPDATE transactions "
-						 "SET blockheight = ?, txindex = ? "
-						 "WHERE id = ?"));
-			db_bind_int(stmt, blockheight);
-			db_bind_int(stmt, txindex);
-			db_bind_txid(stmt, &txid);
-			db_exec_prepared_v2(take(stmt));
-		}
-	}
-}
 
 static void wallet_annotation_add(struct wallet *w, const struct bitcoin_txid *txid, int num,
 				  enum wallet_tx_annotation_type annotation_type, enum wallet_tx_type type, u64 channel)
@@ -7609,7 +7479,7 @@ void wallet_begin_old_close_rescan(struct lightningd *ld)
 
 	/* This is not a leak, though it may take a while! */
 	tal_steal(ld, notleak(missing));
-	bitcoind_getrawblockbyheight(missing, ld->topology->bitcoind, earliest_block,
+	bitcoind_getrawblockbyheight(missing, ld->bitcoind, earliest_block,
 				     mutual_close_p2pkh_catch, missing);
 }
 

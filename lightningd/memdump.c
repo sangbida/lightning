@@ -7,7 +7,7 @@
 #include <common/timeout.h>
 #include <connectd/connectd_wiregen.h>
 #include <hsmd/hsmd_wiregen.h>
-#include <lightningd/chaintopology.h>
+#include <lightningd/watchman.h>
 #include <lightningd/channel.h>
 #include <lightningd/closed_channel.h>
 #include <lightningd/hsm_control.h>

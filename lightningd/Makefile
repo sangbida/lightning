@@ -3,7 +3,7 @@
 LIGHTNINGD_SRC :=				\
 	lightningd/anchorspend.c		\
 	lightningd/bitcoind.c			\
-	lightningd/chaintopology.c		\
+	lightningd/broadcast.c			\
 	lightningd/channel.c			\
 	lightningd/channel_control.c		\
 	lightningd/channel_gossip.c		\

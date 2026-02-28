@@ -28,6 +28,8 @@
 #include <lightningd/memdump.h>
 #include <lightningd/notification.h>
 #include <lightningd/onchain_control.h>
+#include <lightningd/broadcast.h>
+#include <lightningd/feerate.h>
 #include <lightningd/watchman.h>
 #include <lightningd/opening_common.h>
 #include <lightningd/opening_control.h>
@@ -284,13 +286,10 @@ static bool commit_tx_send_finished(struct channel *channel,
 
 	bitcoin_txid(tx, &txid);
 
-	/* If it's already mined, stop retransmitting, stop boosting. */
-	if (wallet_transaction_height(channel->peer->ld->wallet, &txid) != 0) {
-		tal_free(adet);
-		return true;
-	}
-
-	/* Boost (if possible), and keep trying! */
+	/* Boost (if possible), and keep trying!
+	 * (Confirmed txs are removed from the outgoing map by
+	 * broadcast_tx_watch_found, so refresh is only called for
+	 * unconfirmed txs.) */
 	commit_tx_boost(channel, adet, success);
 	return false;
 }
@@ -308,7 +307,6 @@ static struct bitcoin_tx *sign_and_send_last(const tal_t *ctx,
 
 	tx = sign_last_tx(ctx, channel, last_tx, last_sig);
 	bitcoin_txid(tx, &txid);
-	wallet_transaction_add(ld->wallet, tx->wtx, 0, 0);
 	wallet_extract_owned_outputs(ld->wallet, tx->wtx, false, NULL);
 
 	/* Remember anchor information for commit_tx_boost */
@@ -316,7 +314,7 @@ static struct bitcoin_tx *sign_and_send_last(const tal_t *ctx,
 
 	/* Keep broadcasting until we say stop (can fail due to dup,
 	 * if they beat us to the broadcast). */
-	broadcast_tx(channel, ld->topology, channel, tx, cmd_id, false, 0,
+	broadcast_tx(channel, ld, channel, tx, cmd_id, false, 0,
 		     commit_tx_send_finished, NULL, take(adet));
 
 	return tx;
@@ -346,7 +344,7 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 
 	/* Set close attempt height (for anchor rexmission) */
 	if (channel->close_attempt_height == 0) {
-		channel->close_attempt_height = get_block_height(ld->topology);
+		channel->close_attempt_height = get_block_height(ld);
 		wallet_channel_save(channel->peer->ld->wallet, channel);
 	}
 
@@ -425,7 +423,7 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 					"channel/rogue_inflight/%"PRIu64,
 					channel->dbid),
 				&inflight->funding->outpoint.txid,
-				get_block_height(ld->topology));
+				get_block_height(ld));
 		}
 	}
 }
@@ -498,7 +496,7 @@ void resend_opening_transactions(struct lightningd *ld)
 			if (!wtx)
 				continue;
 			bitcoind_sendrawtx(channel,
-					   ld->topology->bitcoind,
+					   ld->bitcoind,
 					   NULL,
 					   tal_hex(tmpctx,
 						   linearize_wtx(tmpctx, wtx)),
@@ -2443,7 +2441,7 @@ void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
 						"channel/wrong_funding_spent/%"PRIu64,
 						channel->dbid),
 					channel->shutdown_wrong_funding,
-					watchman_get_height(ld));
+					get_block_height(ld));
 	}
 }
 
@@ -2476,7 +2474,7 @@ void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 					    tal_fmt(tmpctx, "channel/funding/%"PRIu64,
 						    channel->dbid),
 					    scriptpubkey, tal_count(scriptpubkey),
-					    watchman_get_height(ld));
+					    get_block_height(ld));
 	} else {
 		/* Funding tx already confirmed: register an outpoint watch so
 		 * bwatch tells us when it is spent (fires channel_funding_spent_watch_found). */
@@ -2489,7 +2487,7 @@ void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 					tal_fmt(tmpctx, "channel/funding_spent/%"PRIu64,
 						channel->dbid),
 					&channel->funding,
-					watchman_get_height(ld));
+					get_block_height(ld));
 	}
 	channel_watch_wrong_funding(ld, channel);
 }
@@ -3222,17 +3220,17 @@ static struct command_result *json_getinfo(struct command *cmd,
 
 	json_add_string(response, "version", version());
 	/* Block height is authoritative from bwatch (via watchman). */
-	json_add_num(response, "blockheight", watchman_get_height(cmd->ld));
+	json_add_num(response, "blockheight", get_block_height(cmd->ld));
 	json_add_string(response, "network", chainparams->network_name);
 	json_add_amount_msat(response,
 			     "fees_collected_msat",
 			     wallet_total_forward_fees(cmd->ld->wallet));
 	json_add_string(response, "lightning-dir", cmd->ld->config_netdir);
 
-	if (!cmd->ld->topology->bitcoind->synced)
+	if (!cmd->ld->bitcoind->synced)
 		json_add_string(response, "warning_bitcoind_sync",
 				"Bitcoind is not up-to-date with network.");
-	else if (!topology_synced(cmd->ld->topology))
+	else if (!cmd->ld->bitcoind->synced)
 		json_add_string(response, "warning_lightningd_sync",
 				"Still loading latest blocks from bitcoind.");
 
@@ -3298,7 +3296,7 @@ timeout_waitblockheight_waiter(struct waitblockheight_waiter *w)
 /* Called by lightningd at each new block.  */
 void waitblockheight_notify_new_block(struct lightningd *ld)
 {
-	u32 block_height = get_block_height(ld->topology);
+	u32 block_height = get_block_height(ld);
 	struct waitblockheight_waiter *w, *n;
 	char *to_delete = tal(NULL, char);
 
@@ -3334,7 +3332,7 @@ static struct command_result *json_waitblockheight(struct command *cmd,
 		return command_param_failed();
 
 	/* Check if already reached anyway.  */
-	block_height = get_block_height(cmd->ld->topology);
+	block_height = get_block_height(cmd->ld);
 	if (*target_block_height <= block_height)
 		return waitblockheight_complete(cmd, block_height);
 
@@ -3873,7 +3871,7 @@ static struct command_result *json_dev_forget_channel(struct command *cmd,
 		return command_check_done(cmd);
 
 	if (!channel_state_uncommitted(forget->channel->state))
-		bitcoind_getutxout(cmd, cmd->ld->topology->bitcoind,
+		bitcoind_getutxout(cmd, cmd->ld->bitcoind,
 				   &forget->channel->funding,
 				   process_dev_forget_channel, forget);
 	return command_still_pending(cmd);

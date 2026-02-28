@@ -11,12 +11,17 @@
 #include <common/json_stream.h>
 #include <common/jsonrpc_errors.h>
 #include <common/jsonrpc_io.h>
+#include <common/timeout.h>
 #include <db/exec.h>
+#include <lightningd/bitcoind.h>
+#include <lightningd/broadcast.h>
 #include <lightningd/channel.h>
+#include <lightningd/feerate.h>
 #include <lightningd/gossip_control.h>
 #include <lightningd/jsonrpc.h>
 #include <lightningd/lightningd.h>
 #include <lightningd/log.h>
+#include <lightningd/notification.h>
 #include <lightningd/onchain_control.h>
 #include <lightningd/peer_control.h>
 #include <lightningd/plugin.h>
@@ -42,11 +47,6 @@ struct pending_op {
 	const char *json_params; /* The JSON params to send to bwatch */
 };
 
-struct watchman {
-	struct lightningd *ld;
-	u32 last_processed_height;
-	struct pending_op **pending_ops;  /* Array of pending operations */
-};
 
 /*
  * Datastore persistence helpers
@@ -116,6 +116,9 @@ struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld)
 	wm->last_processed_height = db_get_intvar(ld->wallet->db,
 						  "last_watchman_block_height", 0);
 	wm->pending_ops = tal_arr(wm, struct pending_op *, 0);
+	wm->feerate_floor = 0;
+	memset(wm->feerates, 0, sizeof(wm->feerates));
+	wm->smoothed_feerates = NULL;
 
 	load_pending_ops(wm);
 
@@ -295,14 +298,7 @@ void watchman_replay_pending(struct lightningd *ld)
 	}
 }
 
-/**
- * watchman_get_height - Get watchman's last processed block height
- *
- * Returns the last block height that bwatch has processed.
- * This should be used as the start_block when adding new watches
- * to avoid rescanning from genesis.
- */
-u32 watchman_get_height(struct lightningd *ld)
+u32 get_block_height(struct lightningd *ld)
 {
 	struct watchman *wm = ld->watchman;
 	if (!wm)
@@ -639,6 +635,36 @@ static struct command_result *json_watch_found(struct command *cmd,
 	return command_success(cmd, response);
 }
 
+static void apply_block_feerates(struct lightningd *ld,
+				 const char *buffer,
+				 u32 feerate_floor,
+				 const jsmntok_t *feerates_tok)
+{
+	struct feerate_est *rates;
+	const jsmntok_t *t;
+	size_t i;
+
+	rates = tal_arr(tmpctx, struct feerate_est, feerates_tok->size);
+	json_for_each_arr(i, t, feerates_tok) {
+		u32 blocks, feerate;
+		const char *err;
+
+		err = json_scan(tmpctx, buffer, t,
+				"{blocks:%,feerate:%}",
+				JSON_SCAN(json_to_number, &blocks),
+				JSON_SCAN(json_to_number, &feerate));
+		if (err) {
+			log_unusual(ld->log,
+				    "block_processed: bad feerate entry: %s",
+				    err);
+			return;
+		}
+		rates[i].blockcount = blocks;
+		rates[i].rate = feerate;
+	}
+	update_feerates(ld, feerate_floor, take(rates));
+}
+
 /**
  * json_block_processed - RPC handler for block_processed notifications from bwatch
  *
@@ -653,9 +679,13 @@ static struct command_result *json_block_processed(struct command *cmd,
 {
 	struct watchman *wm = cmd->ld->watchman;
 	u32 *blockheight;
+	u32 *feerate_floor;
+	const jsmntok_t *feerates_tok;
 
 	if (!param_check(cmd, buffer, params,
 			 p_req("blockheight", param_number, &blockheight),
+			 p_opt("feerate_floor", param_number, &feerate_floor),
+			 p_opt("feerates", param_array, &feerates_tok),
 			 NULL))
 		return command_param_failed();
 
@@ -665,7 +695,6 @@ static struct command_result *json_block_processed(struct command *cmd,
 	if (!wm)
 		return command_fail(cmd, LIGHTNINGD, "Watchman not initialized");
 
-	/* Accept any height - handles both forward progress and reorgs */
 	if (*blockheight != wm->last_processed_height) {
 		log_debug(wm->ld->log, "block_processed: %u -> %u",
 			  wm->last_processed_height, *blockheight);
@@ -674,11 +703,12 @@ static struct command_result *json_block_processed(struct command *cmd,
 			      *blockheight);
 	}
 
-	/* Notify gossipd of the authoritative block height (from bwatch) */
-	gossip_notify_blockheight(wm->ld, *blockheight);
+	if (feerate_floor && feerates_tok)
+		apply_block_feerates(wm->ld, buffer, *feerate_floor, feerates_tok);
 
-	/* Drive funding depth for all channels */
 	channel_block_processed(wm->ld, *blockheight);
+	notify_new_block(wm->ld);
+	rebroadcast_txs(wm->ld);
 
 	struct json_stream *response = json_stream_success(cmd);
 	json_add_u32(response, "blockheight", *blockheight);
@@ -730,3 +760,63 @@ static const struct json_command getwatchmanheight_command = {
 	json_getwatchmanheight,
 };
 AUTODATA(json_command, &getwatchmanheight_command);
+
+/**
+ * json_chaininfo - RPC handler for chaininfo from bwatch
+ *
+ * Called by bwatch on startup to inform watchman about the chain name,
+ * IBD status, and sync state. Validates we're on the right network and
+ * sets bitcoind->synced accordingly.
+ */
+static struct command_result *json_chaininfo(struct command *cmd,
+					     const char *buffer,
+					     const jsmntok_t *obj UNNEEDED,
+					     const jsmntok_t *params)
+{
+	const char *chain;
+	u32 *headercount, *blockcount;
+	bool *ibd;
+
+	if (!param_check(cmd, buffer, params,
+			 p_req("chain", param_string, &chain),
+			 p_req("headercount", param_number, &headercount),
+			 p_req("blockcount", param_number, &blockcount),
+			 p_req("ibd", param_bool, &ibd),
+			 NULL))
+		return command_param_failed();
+
+	if (command_check_only(cmd))
+		return command_check_done(cmd);
+
+	if (!streq(chain, chainparams->bip70_name))
+		fatal("Wrong network! Our Bitcoin backend is running on '%s',"
+		      " but we expect '%s'.", chain, chainparams->bip70_name);
+
+	if (*ibd) {
+		log_unusual(cmd->ld->log,
+			    "Waiting for initial block download"
+			    " (this can take a while!)");
+		cmd->ld->bitcoind->synced = false;
+	} else if (*headercount != *blockcount) {
+		log_unusual(cmd->ld->log,
+			    "Waiting for bitcoind to catch up"
+			    " (%u blocks of %u)",
+			    *blockcount, *headercount);
+		cmd->ld->bitcoind->synced = false;
+	} else {
+		cmd->ld->bitcoind->synced = true;
+	}
+
+	struct json_stream *response = json_stream_success(cmd);
+	json_add_string(response, "chain", chain);
+	json_add_bool(response, "synced", cmd->ld->bitcoind->synced);
+	return command_success(cmd, response);
+}
+
+static const struct json_command chaininfo_command = {
+	"chaininfo",
+	json_chaininfo,
+};
+AUTODATA(json_command, &chaininfo_command);
+
+/* --- Height, sync, and lifecycle functions (ex-chaintopology) --- */

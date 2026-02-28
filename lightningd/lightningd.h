@@ -12,6 +12,8 @@
 #include <wallet/wallet.h>
 
 struct amount_msat;
+struct bitcoind;
+struct outgoing_tx_map;
 struct watchman;
 
 /* Various adjustable things. */
@@ -222,8 +224,12 @@ struct lightningd {
 	/* Outstanding connect commands. */
 	struct list_head connects;
 
-	/* Our chain topology. */
-	struct chain_topology *topology;
+	/* The bitcoind backend. */
+	struct bitcoind *bitcoind;
+
+	/* Bitcoin transactions we're broadcasting */
+	struct outgoing_tx_map *outgoing_txs;
+	struct oneshot *rebroadcast_timer;
 
 	/* Blockheight (as acknowledged by gossipd) */
 	u32 gossip_blockheight;

@@ -1,6 +1,6 @@
 #include "config.h"
 #include <common/timeout.h>
-#include <lightningd/chaintopology.h>
+#include <lightningd/watchman.h>
 #include <lightningd/channel.h>
 #include <lightningd/htlc_set.h>
 #include <lightningd/invoice.h>
@@ -72,7 +72,7 @@ void htlc_set_fail_(struct htlc_set *set, const u8 *failmsg TAKES,
 		tal_del_destructor2(set->inpays[i], htlc_set_inpay_destroyed, set);
 
 		if (tal_bytelen(failmsg) == 0)
-			this_failmsg = towire_incorrect_or_unknown_payment_details(tmpctx, set->inpays[i]->msat, get_block_height(set->ld->topology));
+			this_failmsg = towire_incorrect_or_unknown_payment_details(tmpctx, set->inpays[i]->msat, get_block_height(set->ld));
 		else
 			this_failmsg = failmsg;
 

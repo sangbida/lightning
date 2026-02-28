@@ -2,6 +2,7 @@
 #define LIGHTNING_LIGHTNINGD_CHANNEL_CONTROL_H
 #include "config.h"
 #include <ccan/short_types/short_types.h>
+#include <lightningd/channel_state.h>
 #include <stdbool.h>
 
 struct channel;
