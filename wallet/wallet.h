@@ -2043,6 +2043,27 @@ void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
 			      u32 blockheight,
 			      u32 txindex);
 
+/**
+ * wallet_utxo_spent_watch_found - Handler for wallet UTXO spend watch_found notifications
+ * Owner prefix: "wallet/utxo/<txid>:<outnum>"
+ * Called when bwatch detects that a wallet-owned output was spent.
+ */
+void wallet_utxo_spent_watch_found(struct lightningd *ld,
+				   const char *suffix,
+				   const struct bitcoin_tx *tx,
+				   size_t innum UNUSED,
+				   u32 blockheight,
+				   u32 txindex UNUSED);
+
+/**
+ * wallet_record_spend - Record chain movement for a wallet UTXO spend
+ * Called when a wallet-owned output is spent (from bwatch or topo).
+ */
+void wallet_record_spend(struct lightningd *ld,
+			 const struct bitcoin_outpoint *outpoint,
+			 const struct bitcoin_txid *txid,
+			 u32 blockheight);
+
 /* Bwatch watch helpers */
 void wallet_add_bwatch_scriptpubkey(struct lightningd *ld,
 				    const char *owner_prefix,

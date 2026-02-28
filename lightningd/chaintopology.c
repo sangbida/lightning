@@ -734,29 +734,12 @@ static void updates_complete(struct chain_topology *topo)
 	next_topology_timer(topo);
 }
 
-static void record_wallet_spend(struct lightningd *ld,
-				const struct bitcoin_outpoint *outpoint,
-				const struct bitcoin_txid *txid,
-				u32 tx_blockheight)
-{
-	struct utxo *utxo;
-
-	/* Find the amount this was for */
-	utxo = wallet_utxo_get(tmpctx, ld->wallet, outpoint);
-	if (!utxo) {
-		log_broken(ld->log, "No record of utxo %s",
-			   fmt_bitcoin_outpoint(tmpctx,
-					  outpoint));
-		return;
-	}
-
-	wallet_save_chain_mvt(ld, new_coin_wallet_withdraw(tmpctx, txid, outpoint,
-						      tx_blockheight,
-						      utxo->amount, mk_mvt_tags(MVT_WITHDRAWAL)));
-}
-
 /**
- * topo_update_spends -- Tell the wallet about all spent outpoints
+ * topo_update_spends -- Tell the wallet about spent outpoints (utxoset only)
+ *
+ * Wallet-owned output spends are now notified by bwatch via wallet/utxo/
+ * watch_found. We only update utxoset (P2WSH channel tracking) and
+ * notify gossipd of channel closes here.
  */
 static void topo_update_spends(struct chain_topology *topo,
 			       struct bitcoin_tx **txs,
@@ -765,6 +748,8 @@ static void topo_update_spends(struct chain_topology *topo,
 {
 	const struct short_channel_id *spent_scids;
 	const size_t num_txs = tal_count(txs);
+
+	/* Update utxoset spend heights (P2WSH channel outputs) */
 	for (size_t i = 0; i < num_txs; i++) {
 		const struct bitcoin_tx *tx = txs[i];
 
@@ -772,12 +757,8 @@ static void topo_update_spends(struct chain_topology *topo,
 			struct bitcoin_outpoint outpoint;
 
 			bitcoin_tx_input_get_outpoint(tx, j, &outpoint);
-
-			if (wallet_outpoint_spend(tmpctx, topo->ld->wallet,
-						  blockheight, &outpoint))
-				record_wallet_spend(topo->ld, &outpoint,
-						    &txids[i], blockheight);
-
+			wallet_outpoint_spend(tmpctx, topo->ld->wallet,
+					     blockheight, &outpoint);
 		}
 	}
 

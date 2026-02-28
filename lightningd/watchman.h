@@ -149,7 +149,7 @@ void watchman_get_transaction(struct lightningd *ld,
 			      void *arg);
 
 /**
- * watchman_add_utxo - Add a wallet-originated UTXO to bwatch's datastore
+ * watchman_add_utxo - Add a UTXO to bwatch's datastore
  * @ld: lightningd instance
  * @outpoint: the output to add
  * @blockheight: block height (0 for unconfirmed)
@@ -157,14 +157,17 @@ void watchman_get_transaction(struct lightningd *ld,
  * @script: scriptpubkey
  * @script_len: script length
  * @sat: amount in satoshis
+ * @owner: required; bwatch registers WATCH_OUTPOINT so we get notified when
+ *         spent (e.g. "wallet/utxo/<txid>:<outnum>" or "onchaind/outpoint/<dbid>").
+ *         Bwatch deduplicates if the same owner already watches.
  *
- * Called when we create our own outputs (e.g. change outputs).
  * Fire-and-forget; bwatch must be ready.
  */
 void watchman_add_utxo(struct lightningd *ld,
 		       const struct bitcoin_outpoint *outpoint,
 		       u32 blockheight, u32 txindex,
 		       const u8 *script, size_t script_len,
-		       struct amount_sat sat);
+		       struct amount_sat sat,
+		       const char *owner);
 
 #endif /* LIGHTNING_LIGHTNINGD_WATCHMAN_H */

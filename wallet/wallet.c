@@ -9,6 +9,7 @@
 #include <channeld/channeld_wiregen.h>
 #include <plugins/bwatch/bwatch_wiregen.h>
 #include <common/clock_time.h>
+#include <common/json_parse.h>
 #include <common/json_stream.h>
 #include <common/memleak.h>
 #include <common/mkdatastorekey.h>
@@ -3421,12 +3422,15 @@ type_ok:
 	/* Add to bwatch's datastore (replaces outputs table). blockheight 0 = unconfirmed.
 	 * TODO: txindex is always 0 here - wallet_extract_owned_outputs and rescan don't
 	 * have block tx order. Bwatch will overwrite with correct txindex when it sees
-	 * the tx in a block (scriptpubkey match). */
+	 * the tx in a block (scriptpubkey match).
+	 * owner: so bwatch notifies us when this wallet output is spent. */
 	watchman_add_utxo(w->ld, &utxo->outpoint,
 			  blockheight ? *blockheight : 0,
 			  0, /* txindex: not available at this callsite */
 			  utxo->scriptPubkey, tal_bytelen(utxo->scriptPubkey),
-			  utxo->amount);
+			  utxo->amount,
+			  tal_fmt(tmpctx, "wallet/utxo/%s",
+				  fmt_bitcoin_outpoint(tmpctx, &utxo->outpoint)));
 
 	/* This is an unconfirmed change output, we should track it */
 	if (utxo->utxotype != UTXO_P2SH_P2WPKH && !blockheight) {
@@ -3510,6 +3514,10 @@ static void wallet_watch_scriptpubkey_common(struct lightningd *ld,
 	bitcoin_tx_output_get_amount_sat(tx, outnum, &amount);
 	
 	invoice_check_onchain_payment(ld, txout->script, amount, &outpoint);
+
+	/* Store the output and register spend watch so bwatch notifies when spent */
+	got_utxo(w, keyindex, addrtype, tx->wtx, outnum, is_coinbase,
+		 &blockheight, &outpoint);
 
 	log_debug(w->log, "Wallet watch found: keyindex=%u, addrtype=%d, amount=%s, blockheight=%u%s",
 		  keyindex, addrtype, fmt_amount_sat(tmpctx, amount), blockheight,
@@ -5051,6 +5059,51 @@ bool wallet_outpoint_spend(const tal_t *ctx, struct wallet *w, const u32 blockhe
 		tal_free(stmt);
 	}
 	return our_spend;
+}
+
+void wallet_record_spend(struct lightningd *ld,
+			const struct bitcoin_outpoint *outpoint,
+			const struct bitcoin_txid *txid,
+			u32 blockheight)
+{
+	struct utxo *utxo;
+
+	utxo = wallet_utxo_get(tmpctx, ld->wallet, outpoint);
+	if (!utxo) {
+		log_broken(ld->log, "No record of utxo %s",
+			   fmt_bitcoin_outpoint(tmpctx, outpoint));
+		return;
+	}
+
+	wallet_save_chain_mvt(ld, new_coin_wallet_withdraw(tmpctx, txid, outpoint,
+							  blockheight,
+							  utxo->amount,
+							  mk_mvt_tags(MVT_WITHDRAWAL)));
+}
+
+void wallet_utxo_spent_watch_found(struct lightningd *ld,
+				   const char *suffix,
+				   const struct bitcoin_tx *tx,
+				   size_t innum UNUSED,
+				   u32 blockheight,
+				   u32 txindex UNUSED)
+{
+	struct bitcoin_outpoint outpoint;
+	jsmntok_t tok;
+	struct bitcoin_txid spending_txid;
+
+	tok.start = 0;
+	tok.end = strlen(suffix);
+	if (!json_to_outpoint(suffix, &tok, &outpoint)) {
+		log_broken(ld->log, "wallet/utxo watch_found: invalid suffix %s",
+			   suffix);
+		return;
+	}
+
+	bitcoin_txid(tx, &spending_txid);
+
+	if (wallet_outpoint_spend(tmpctx, ld->wallet, blockheight, &outpoint))
+		wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
 }
 
 void wallet_utxoset_add(struct wallet *w,

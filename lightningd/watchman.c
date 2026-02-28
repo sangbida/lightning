@@ -494,7 +494,8 @@ void watchman_add_utxo(struct lightningd *ld,
 		       const struct bitcoin_outpoint *outpoint,
 		       u32 blockheight, u32 txindex,
 		       const u8 *script, size_t script_len,
-		       struct amount_sat sat)
+		       struct amount_sat sat,
+		       const char *owner)
 {
 	struct watchman *wm = ld->watchman;
 	struct json_stream *js;
@@ -523,6 +524,7 @@ void watchman_add_utxo(struct lightningd *ld,
 	json_add_u32(js, "txindex", txindex);
 	json_add_hex(js, "scriptpubkey", script, script_len);
 	json_add_u64(js, "satoshis", sat.satoshis);
+	json_add_string(js, "owner", owner);
 	json_object_end(js);
 
 	json_params = tal_strndup(tmpctx, json_out_contents(js->jout, &len), len);
@@ -534,6 +536,7 @@ static const struct watch_dispatch {
 	const char *prefix;
 	watch_found_fn handler;
 } watch_handlers[] = {
+	{ "wallet/utxo/",         wallet_utxo_spent_watch_found },
 	{ "wallet/p2wpkh/",       wallet_watch_p2wpkh },
 	{ "wallet/p2tr/",         wallet_watch_p2tr },
 	{ "wallet/p2sh_p2wpkh/",  wallet_watch_p2sh_p2wpkh },

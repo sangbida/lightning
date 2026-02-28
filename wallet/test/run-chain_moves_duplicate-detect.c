@@ -406,7 +406,8 @@ void watchman_add_utxo(struct lightningd *ld UNNEEDED,
 		       const struct bitcoin_outpoint *outpoint UNNEEDED,
 		       u32 blockheight UNNEEDED, u32 txindex UNNEEDED,
 		       const u8 *script UNNEEDED, size_t script_len UNNEEDED,
-		       struct amount_sat sat UNNEEDED)
+		       struct amount_sat sat UNNEEDED,
+		       const char *owner UNNEEDED)
 { fprintf(stderr, "watchman_add_utxo called!\n"); abort(); }
 /* Generated stub for watchman_get_height */
 u32 watchman_get_height(struct lightningd *ld UNNEEDED)

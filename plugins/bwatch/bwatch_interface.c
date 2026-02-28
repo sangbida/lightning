@@ -271,9 +271,11 @@ struct command_result *json_bwatch_del(struct command *cmd,
 	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
 }
 
-/* RPC command: addutxo - Add a wallet-originated UTXO to bwatch's datastore.
- * Called by lightningd when we create our own outputs (e.g. change outputs).
- * blockheight 0 = unconfirmed. */
+/* RPC command: addutxo - Add a UTXO to bwatch's datastore.
+ * Called by lightningd when we create outputs (e.g. change, onchaind).
+ * blockheight 0 = unconfirmed.
+ * owner: required; register WATCH_OUTPOINT so bwatch notifies when spent.
+ *        Bwatch deduplicates if the same owner already watches this outpoint. */
 struct command_result *json_bwatch_addutxo(struct command *cmd,
 					   const char *buffer,
 					   const jsmntok_t *params)
@@ -283,6 +285,7 @@ struct command_result *json_bwatch_addutxo(struct command *cmd,
 	u32 *txindex;
 	u8 *scriptpubkey;
 	struct amount_sat *satoshis;
+	const char *owner;
 
 	if (!param_check(cmd, buffer, params,
 			 p_req("outpoint", param_outpoint, &outpoint),
@@ -290,6 +293,7 @@ struct command_result *json_bwatch_addutxo(struct command *cmd,
 			 p_req("txindex", param_u32, &txindex),
 			 p_req("scriptpubkey", param_bin_from_hex, &scriptpubkey),
 			 p_req("satoshis", param_sat, &satoshis),
+			 p_req("owner", param_string, &owner),
 			 NULL))
 		return command_param_failed();
 
@@ -298,6 +302,14 @@ struct command_result *json_bwatch_addutxo(struct command *cmd,
 
 	bwatch_utxoset_add(cmd, outpoint, *blockheight, *txindex,
 			  scriptpubkey, tal_bytelen(scriptpubkey), *satoshis);
+
+	{
+		struct bwatch *bwatch = bwatch_of(cmd->plugin);
+		u32 start_block = *blockheight ? *blockheight : bwatch->current_height;
+
+		bwatch_add_watch(cmd, bwatch, WATCH_OUTPOINT, outpoint,
+				 NULL, NULL, NULL, start_block, owner);
+	}
 	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 }
 

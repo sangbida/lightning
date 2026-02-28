@@ -544,6 +544,10 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 		  fmt_bitcoin_outpoint(tmpctx, &outpoint),
 		  csv_lock);
 
+	watchman_add_utxo(channel->peer->ld, &outpoint, blockheight, 0,
+			  scriptPubkey, tal_bytelen(scriptPubkey), amount,
+			  tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid));
+
 	wallet_add_onchaind_utxo(channel->peer->ld->wallet,
 				 &outpoint, scriptPubkey,
 				 blockheight, amount, channel,
