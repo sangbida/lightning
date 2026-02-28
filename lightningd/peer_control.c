@@ -2335,12 +2335,13 @@ void channel_block_processed(struct lightningd *ld, u32 blockheight)
 
 /* bwatch handler: the "wrong" funding outpoint was spent (shutdown_wrong_funding case) */
 void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
-					     u32 dbid,
+					     const char *suffix,
 					     const struct bitcoin_tx *tx,
 					     size_t innum,
 					     u32 blockheight,
 					     u32 txindex UNUSED)
 {
+	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
 	struct bitcoin_txid txid;
 
@@ -2372,12 +2373,13 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
  * watches so bwatch doesn't fire for them anymore.
  */
 void channel_rogue_inflight_watch_found(struct lightningd *ld,
-					u32 dbid,
+					const char *suffix,
 					const struct bitcoin_tx *tx,
 					size_t outnum UNUSED,
 					u32 blockheight UNUSED,
 					u32 txindex UNUSED)
 {
+	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
 	struct channel_inflight *inflight, *other;
 	struct bitcoin_txid txid;
@@ -2551,12 +2553,13 @@ static bool channel_splice_watch_found(struct lightningd *ld,
 }
 
 void channel_funding_watch_found(struct lightningd *ld,
-				 u32 dbid,
+				 const char *suffix,
 				 const struct bitcoin_tx *tx,
 				 size_t outnum,
 				 u32 blockheight,
 				 u32 txindex)
 {
+	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
 	struct bitcoin_txid txid;
 
@@ -2622,12 +2625,13 @@ void channel_funding_watch_found(struct lightningd *ld,
 }
 
 void channel_funding_spent_watch_found(struct lightningd *ld,
-				       u32 dbid,
+				       const char *suffix,
 				       const struct bitcoin_tx *tx,
 				       size_t innum,
 				       u32 blockheight,
 				       u32 txindex UNUSED)
 {
+	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
 	struct bitcoin_txid spending_txid;
 	struct channel_inflight *inflight;

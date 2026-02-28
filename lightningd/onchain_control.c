@@ -295,12 +295,13 @@ static void onchain_txo_spent(struct channel *channel,
  * Owner format: "onchaind/outpoint/<dbid>"
  */
 void onchaind_output_watch_found(struct lightningd *ld,
-				 u32 dbid,
+				 const char *suffix,
 				 const struct bitcoin_tx *tx,
 				 size_t innum,
 				 u32 blockheight,
 				 u32 txindex UNUSED)
 {
+	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
 
 	if (!channel) {
@@ -329,12 +330,13 @@ void onchaind_output_watch_found(struct lightningd *ld,
  * come from onchaind_send_depth_updates via channel_block_processed.
  */
 void onchaind_tx_watch_found(struct lightningd *ld,
-			     u32 dbid,
+			     const char *suffix,
 			     const struct bitcoin_tx *tx,
 			     size_t outnum UNUSED,
 			     u32 blockheight,
 			     u32 txindex UNUSED)
 {
+	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
 	struct bitcoin_txid txid;
 	struct onchaind_watched_tx *entry;

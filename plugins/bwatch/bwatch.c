@@ -350,6 +350,7 @@ static const char *init(struct command *cmd,
 	bwatch->scriptpubkey_watches = new_htable(bwatch, scriptpubkey_watches);
 	bwatch->outpoint_watches = new_htable(bwatch, outpoint_watches);
 	bwatch->txid_watches = new_htable(bwatch, txid_watches);
+	bwatch->scid_watches = new_htable(bwatch, scid_watches);
 
 	/* Initialize block history */
 	bwatch->block_history = tal_arr(bwatch, struct block_record_wire *, 0);

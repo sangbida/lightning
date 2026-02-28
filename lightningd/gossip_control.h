@@ -2,7 +2,9 @@
 #define LIGHTNING_LIGHTNINGD_GOSSIP_CONTROL_H
 #include "config.h"
 #include <bitcoin/short_channel_id.h>
+#include <lightningd/watchman.h>
 
+struct bitcoin_tx;
 struct channel;
 struct lightningd;
 
@@ -21,5 +23,19 @@ void gossip_notify_new_block(struct lightningd *ld);
  * bwatch's block_processed, not chaintopology.
  */
 void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight);
+
+/**
+ * gossip_scid_watch_found - bwatch handler: a watched SCID output was confirmed.
+ * Owner prefix: "gossip/<scid>" (e.g. "gossip/539268x845x1")
+ *
+ * Extracts script and amount from the confirmed tx output and sends
+ * get_txout_reply to gossipd, completing a pending get_txout request.
+ */
+void gossip_scid_watch_found(struct lightningd *ld,
+			     const char *suffix,
+			     const struct bitcoin_tx *tx,
+			     size_t outnum,
+			     u32 blockheight,
+			     u32 txindex);
 
 #endif /* LIGHTNING_LIGHTNINGD_GOSSIP_CONTROL_H */

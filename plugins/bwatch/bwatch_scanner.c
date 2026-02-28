@@ -3,6 +3,7 @@
 #include "bwatch_store.h"
 #include "bwatch_scanner.h"
 #include "bwatch_interface.h"
+#include <bitcoin/script.h>
 #include <bitcoin/tx.h>
 #include <ccan/mem/mem.h>
 #include <common/amount.h>
@@ -37,7 +38,7 @@ static void check_txid_watches(struct command *cmd,
 			   w->start_block, blockheight);
 		return;
 	}
-	bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX, UINT32_MAX);
+	bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX);
 }
 
 /* Store a matched scriptpubkey output in bwatch's datastore (utxoset + transaction) */
@@ -93,7 +94,7 @@ static void check_scriptpubkey_watches(struct command *cmd,
 		sat = amount_asset_to_sat(&asset);
 		store_scriptpubkey_match(cmd, tx, i, blockheight, txindex,
 					 k.script, k.len, sat);
-		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, i, UINT32_MAX);
+		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, i);
 	}
 }
 
@@ -122,7 +123,7 @@ static void check_outpoint_watches(struct command *cmd,
 				   w->start_block, blockheight);
 			continue;
 		}
-		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX, i);
+		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, i);
 	}
 }
 
@@ -163,7 +164,7 @@ static void check_tx_txid(struct command *cmd,
 			  u32 txindex)
 {
 	if (bitcoin_txid_eq(tx_txid, &w->key.txid))
-		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX, UINT32_MAX);
+		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX);
 }
 
 /* Check tx outputs against a specific scriptpubkey */
@@ -185,7 +186,7 @@ static void check_tx_scriptpubkey(struct command *cmd,
 			store_scriptpubkey_match(cmd, tx, i, blockheight, txindex,
 						tx->wtx->outputs[i].script,
 						tx->wtx->outputs[i].script_len, sat);
-			bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, i, UINT32_MAX);
+			bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, i);
 			/* Don't return - tx might have multiple outputs to same scriptpubkey */
 		}
 	}
@@ -206,9 +207,81 @@ static void check_tx_outpoint(struct command *cmd,
 		outpoint.n = tx->wtx->inputs[i].index;
 
 		if (bitcoin_outpoint_eq(&outpoint, &w->key.outpoint)) {
-			bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX, i);
+			bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, i);
 			return; /* An outpoint can only be spent once */
 		}
+	}
+}
+
+static void maybe_fire_scid_watch(struct command *cmd,
+				  struct bwatch *bwatch,
+				  const struct bitcoin_block *block,
+				  u32 blockheight,
+				  const struct watch *w)
+{
+	struct bitcoin_tx *tx;
+	struct bitcoin_outpoint outpoint;
+	u32 scid_blockheight, txindex, outnum;
+
+	if (w->type != WATCH_SCID)
+		return;
+
+	scid_blockheight = short_channel_id_blocknum(w->key.scid);
+	if (scid_blockheight != blockheight)
+		return;
+
+	txindex = short_channel_id_txnum(w->key.scid);
+	outnum = short_channel_id_outnum(w->key.scid);
+
+	if (txindex >= tal_count(block->tx)) {
+		plugin_log(cmd->plugin, LOG_BROKEN,
+			   "scid watch blockheight=%u txindex=%u outnum=%u: txindex out of range (block has %zu txs)",
+			   blockheight, txindex, outnum, tal_count(block->tx));
+		return;
+	}
+	tx = block->tx[txindex];
+	if (outnum >= tx->wtx->num_outputs) {
+		plugin_log(cmd->plugin, LOG_BROKEN,
+			   "scid watch blockheight=%u txindex=%u outnum=%u: outnum out of range (tx has %zu outputs)",
+			   blockheight, txindex, outnum, tx->wtx->num_outputs);
+		return;
+	}
+
+	/* Notify lightningd that the scid output was confirmed. */
+	bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, outnum);
+
+	/* Register a spend watch so we're notified if the output is later spent. */
+	bitcoin_txid(tx, &outpoint.txid);
+	outpoint.n = outnum;
+	for (size_t i = 0; i < tal_count(w->owners); i++)
+		bwatch_add_watch(cmd, bwatch,
+				 WATCH_OUTPOINT, &outpoint, NULL, NULL, NULL,
+				 blockheight, w->owners[i]);
+}
+
+/* Check scid watches for a block.
+ * In rescan mode (w != NULL), fires only that specific watch if its blockheight matches.
+ * In normal polling (w == NULL), fires all scid watches whose blockheight matches. */
+void bwatch_check_scid_watches(struct command *cmd,
+			       struct bwatch *bwatch,
+			       const struct bitcoin_block *block,
+			       u32 blockheight,
+			       const struct watch *w)
+{
+	if (w) {
+		maybe_fire_scid_watch(cmd, bwatch, block, blockheight, w);
+		return;
+	}
+
+	/* Iterate all scid watches for this block */
+	struct scid_watches_iter it;
+	struct watch *scid_w;
+
+	/* We need to iterate scid watches where blockheight matches */
+	for (scid_w = scid_watches_first(bwatch->scid_watches, &it);
+	     scid_w;
+	     scid_w = scid_watches_next(bwatch->scid_watches, &it)) {
+		maybe_fire_scid_watch(cmd, bwatch, block, blockheight, scid_w);
 	}
 }
 
@@ -233,6 +306,12 @@ static void check_tx_for_single_watch(struct command *cmd,
 	case WATCH_OUTPOINT:
 		check_tx_outpoint(cmd, tx, w, blockheight, blockhash, txindex);
 		break;
+	case WATCH_SCID:
+		/* SCID watches don't scan transactions: the txindex is
+		 * already known from the scid key, so bwatch_check_scid_watches
+		 * handles them directly at the block level (called after this loop
+		 * in bwatch_process_block_txs, including during rescan). */
+		break;
 	}
 }
 
@@ -254,4 +333,7 @@ void bwatch_process_block_txs(struct command *cmd,
 			check_tx_against_all_watches(cmd, bwatch, block->tx[i],
 						      blockheight, blockhash, i);
 	}
+
+	/* Check scid watches for this block (async getutxout) */
+	bwatch_check_scid_watches(cmd, bwatch, block, blockheight, w);
 }

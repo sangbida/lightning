@@ -2,6 +2,7 @@
 #define LIGHTNING_LIGHTNINGD_WATCHMAN_H
 
 #include "config.h"
+#include <bitcoin/short_channel_id.h>
 #include <bitcoin/tx.h>
 
 struct lightningd;
@@ -11,7 +12,9 @@ struct bitcoin_tx;
 /**
  * watch_found_fn - Handler for watch_found notifications
  * @ld: lightningd instance
- * @id: the parsed ID from the owner string (keyindex for wallet, dbid for channels, etc.)
+ * @suffix: the owner string after the prefix (e.g. "42" for wallet/p2wpkh/42,
+ *          or "100x1x0" for gossip/100x1x0); the handler is responsible for
+ *          parsing whatever identifier it stored in that suffix
  * @tx: the transaction that matched
  * @outnum: which output matched (for scriptpubkey watches) or input for outpoint watches
  * @blockheight: the block height where tx was found
@@ -20,7 +23,7 @@ struct bitcoin_tx;
  * Called when bwatch detects a watched item in a block.
  */
 typedef void (*watch_found_fn)(struct lightningd *ld,
-			       u32 id,
+			       const char *suffix,
 			       const struct bitcoin_tx *tx,
 			       size_t outnum,
 			       u32 blockheight,
@@ -120,6 +123,17 @@ void watchman_watch_txid(struct lightningd *ld,
 void watchman_unwatch_txid(struct lightningd *ld,
 			   const char *owner,
 			   const struct bitcoin_txid *txid);
+
+/** Register a WATCH_SCID — fires when bwatch finds the output (for gossip get_txout). */
+void watchman_watch_scid(struct lightningd *ld,
+			 const char *owner,
+			 const struct short_channel_id *scid,
+			 u32 start_block);
+
+/** Remove a WATCH_SCID. */
+void watchman_unwatch_scid(struct lightningd *ld,
+			   const char *owner,
+			   const struct short_channel_id *scid);
 
 /**
  * watchman_get_transaction - Fetch a tx from bwatch via gettransaction RPC.

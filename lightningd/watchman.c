@@ -377,6 +377,31 @@ void watchman_unwatch_txid(struct lightningd *ld,
 			     fmt_bitcoin_txid(tmpctx, txid)));
 }
 
+void watchman_watch_scid(struct lightningd *ld,
+			 const char *owner,
+			 const struct short_channel_id *scid,
+			 u32 start_block)
+{
+	watchman_add(ld, owner,
+		     tal_fmt(tmpctx,
+			     "{\"type\":\"scid\""
+			     ",\"scid\":\"%s\""
+			     ",\"start_block\":%u}",
+			     fmt_short_channel_id(tmpctx, *scid),
+			     start_block));
+}
+
+void watchman_unwatch_scid(struct lightningd *ld,
+			   const char *owner,
+			   const struct short_channel_id *scid)
+{
+	watchman_del(ld, owner,
+		     tal_fmt(tmpctx,
+			     "{\"type\":\"scid\""
+			     ",\"scid\":\"%s\"}",
+			     fmt_short_channel_id(tmpctx, *scid)));
+}
+
 struct gettransaction_call {
 	struct lightningd *ld;
 	void (*cb)(struct bitcoin_tx *tx, u32 blockheight, void *arg);
@@ -524,28 +549,16 @@ static const struct watch_dispatch {
 	{ "onchaind/txid/",                   onchaind_tx_watch_found },
 	/* onchaind/outpoint/<dbid>: WATCH_OUTPOINT, fires when any onchaind output is spent */
 	{ "onchaind/outpoint/",               onchaind_output_watch_found },
+	/* gossip/<scid>: WATCH_SCID, fires when a channel announcement UTXO is confirmed */
+	{ "gossip/",                          gossip_scid_watch_found },
 };
-
-/**
- * parse_watch_id - Extract numeric ID from owner suffix
- *
- * Parses the numeric ID from the owner string suffix.
- * This is used for keyindex (wallet), channel_dbid (channel watches),
- * etc. Returns true on success, false on parse error.
- */
-static bool parse_watch_id(const char *suffix, u32 *id)
-{
-	char *endp;
-	
-	*id = strtol(suffix, &endp, 10);
-	return *endp == '\0';
-}
 
 /**
  * dispatch_watch_found - Find and call the appropriate handler for an owner
  *
- * Matches the owner string against registered prefixes, parses the ID,
- * and dispatches to the appropriate handler.
+ * Matches the owner string against registered prefixes and dispatches to the
+ * appropriate handler, passing the raw suffix (the part after the prefix).
+ * Each handler is responsible for parsing its own identifier from the suffix.
  */
 static void dispatch_watch_found(struct lightningd *ld,
 				 const char *owner,
@@ -554,36 +567,16 @@ static void dispatch_watch_found(struct lightningd *ld,
 				 u32 blockheight,
 				 u32 txindex)
 {
-	const struct watch_dispatch *handler = NULL;
-	const char *suffix = NULL;
-	u32 id;
-	
-	/* Find matching handler by prefix */
 	for (size_t i = 0; i < ARRAY_SIZE(watch_handlers); i++) {
 		if (strstarts(owner, watch_handlers[i].prefix)) {
-			handler = &watch_handlers[i];
-			/* Extract suffix by skipping past the prefix
-			 * E.g., owner="wallet/p2wpkh/42", prefix="wallet/p2wpkh/"
-			 *       -> suffix="42" */
-			suffix = owner + strlen(handler->prefix);
-			break;
+			const char *suffix = owner + strlen(watch_handlers[i].prefix);
+			watch_handlers[i].handler(ld, suffix, tx, outnum,
+						  blockheight, txindex);
+			return;
 		}
 	}
-	
-	if (!handler) {
-		/* No handler found - this is ok, might be a watch type we don't handle yet */
-		log_debug(ld->log, "No handler for watch owner: %s", owner);
-		return;
-	}
-	
-	/* Parse the ID from the suffix (keyindex, channel_dbid, etc.) */
-	if (!parse_watch_id(suffix, &id)) {
-		log_broken(ld->log, "Invalid ID in watch owner: %s", owner);
-		return;
-	}
-	
-	/* Dispatch to handler */
-	handler->handler(ld, id, tx, outnum, blockheight, txindex);
+
+	log_debug(ld->log, "No handler for watch owner: %s", owner);
 }
 
 static struct command_result *param_bitcoin_tx(struct command *cmd,
@@ -614,53 +607,29 @@ static struct command_result *json_watch_found(struct command *cmd,
 					       const jsmntok_t *params)
 {
 	struct watchman *wm = cmd->ld->watchman;
-	const char *type, **owners;
-	u32 *blockheight, *txindex, *outnum, *innum;
+	const char **owners;
+	u32 *blockheight, *txindex, *index;
 	struct bitcoin_tx *tx;
-	void *unused;
 
 	if (!param_check(cmd, buffer, params,
 		   p_req("tx", param_bitcoin_tx, &tx),
 		   p_req("blockheight", param_number, &blockheight),
 		   p_req("txindex", param_number, &txindex),
-		   p_req("type", param_string, &type),
 		   p_req("owners", param_string_array, &owners),
-		   p_opt("outnum", param_number, &outnum),
-		   p_opt("innum", param_number, &innum),
-		   p_opt("txid", param_ignore, &unused),
-		   p_opt("scriptpubkey", param_ignore, &unused),
-		   p_opt("outpoint", param_ignore, &unused),
+		   p_opt("index", param_number, &index),
 		   NULL))
 		return command_param_failed();
-
-	if (outnum && innum)
-		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-				    "Can only set one of outnum or innum");
 
 	assert(wm);
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
 
-	/* Log the watch_found notification */
-	log_info(cmd->ld->log, "watch_found: %s at block %u", type, *blockheight);
+	log_info(cmd->ld->log, "watch_found at block %u", *blockheight);
 
-	/* Bwatch now tells us exactly which output/input matched.
-	 * outnum = output index for scriptpubkey watches
-	 * innum = input index for outpoint watches
-	 * For txid watches, neither is set so index defaults to 0
-	 * (which those handlers ignore anyway). */
-	for (size_t i = 0; i < tal_count(owners); i++) {
-		size_t index;
-		
-		if (outnum)
-			index = *outnum;
-		else if (innum)
-			index = *innum;
-		else
-			index = 0;
-		
-		dispatch_watch_found(cmd->ld, owners[i], tx, index, *blockheight, *txindex);
-	}
+	for (size_t i = 0; i < tal_count(owners); i++)
+		dispatch_watch_found(cmd->ld, owners[i], tx,
+				     index ? *index : 0,
+				     *blockheight, *txindex);
 
 	struct json_stream *response = json_stream_success(cmd);
 	json_add_u32(response, "blockheight", *blockheight);

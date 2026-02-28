@@ -1,86 +1,27 @@
 #include "config.h"
+#include <bitcoin/short_channel_id.h>
+#include <bitcoin/tx.h>
 #include <ccan/err/err.h>
+#include <ccan/tal/str/str.h>
 #include <ccan/io/io.h>
 #include <ccan/ptrint/ptrint.h>
+#include <common/amount.h>
 #include <common/json_command.h>
 #include <connectd/connectd_wiregen.h>
-#include <hsmd/permissions.h>
 #include <lightningd/chaintopology.h>
 #include <lightningd/channel.h>
 #include <lightningd/channel_gossip.h>
 #include <lightningd/gossip_control.h>
-#include <lightningd/hsm_control.h>
 #include <lightningd/jsonrpc.h>
 #include <lightningd/lightningd.h>
 #include <lightningd/subd.h>
-
-static void got_txout(struct bitcoind *bitcoind,
-		      const struct bitcoin_tx_output *output,
-		      struct short_channel_id scid)
-{
-	const u8 *script;
-	struct amount_sat sat;
-
-	/* output will be NULL if it wasn't found */
-	if (output) {
-		script = output->script;
-		sat = output->amount;
-	} else {
-		script = NULL;
-		sat = AMOUNT_SAT(0);
-	}
-
-	subd_send_msg(
-	    bitcoind->ld->gossip,
-	    take(towire_gossipd_get_txout_reply(NULL, scid, sat, script)));
-}
-
-static void got_filteredblock(struct bitcoind *bitcoind,
-			      const struct filteredblock *fb,
-			      struct short_channel_id *scidp)
-{
-	struct filteredblock_outpoint *fbo = NULL, *o;
-	struct bitcoin_tx_output txo;
-	struct short_channel_id scid = *scidp;
-
-	/* Don't leak this! */
-	tal_free(scidp);
-
-	/* If we failed to the filtered block we report the failure to
-	 * got_txout. */
-	if (fb == NULL)
-		return got_txout(bitcoind, NULL, scid);
-
-	/* This routine is mainly for past blocks.  As a corner case,
-	 * we will grab (but not save) future blocks if we're
-	 * syncing */
-	if (fb->height < bitcoind->ld->topology->root->height)
-		wallet_filteredblock_add(bitcoind->ld->wallet, fb);
-
-	u32 outnum = short_channel_id_outnum(scid);
-	u32 txindex = short_channel_id_txnum(scid);
-	for (size_t i=0; i<tal_count(fb->outpoints); i++) {
-		o = fb->outpoints[i];
-		if (o->txindex == txindex && o->outpoint.n == outnum) {
-			fbo = o;
-			break;
-		}
-	}
-
-	if (fbo) {
-		txo.amount = fbo->amount;
-		txo.script = (u8 *)fbo->scriptPubKey;
-		got_txout(bitcoind, &txo, scid);
-	} else
-		got_txout(bitcoind, NULL, scid);
-}
+#include <lightningd/watchman.h>
 
 static void get_txout(struct subd *gossip, const u8 *msg)
 {
 	struct short_channel_id scid;
 	struct outpoint *op;
 	u32 blockheight;
-	struct chain_topology *topo = gossip->ld->topology;
 
 	if (!fromwire_gossipd_get_txout(msg, &scid))
 		fatal("Gossip gave bad GOSSIP_GET_TXOUT message %s",
@@ -106,11 +47,13 @@ static void get_txout(struct subd *gossip, const u8 *msg)
 		if (gossip->ld->state == LD_STATE_SHUTDOWN)
 			return;
 
-		/* Make a pointer of a copy of scid here, for got_filteredblock */
-		bitcoind_getfilteredblock(topo->bitcoind, topo->bitcoind,
-					  short_channel_id_blocknum(scid),
-					  got_filteredblock,
-					  tal_dup(gossip, struct short_channel_id, &scid));
+		/* Add scid watch via bwatch; when watch_found fires we reply */
+		u32 start_block = watchman_get_height(gossip->ld);
+		if (blockheight < start_block)
+			start_block = blockheight;
+		watchman_watch_scid(gossip->ld,
+				   tal_fmt(gossip, "gossip/%s", fmt_short_channel_id(gossip, scid)),
+				   &scid, start_block);
 	}
 }
 
@@ -255,6 +198,45 @@ void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight)
 	subd_req(ld->gossip, ld->gossip,
 		 take(towire_gossipd_new_blockheight(NULL, blockheight)),
 		 -1, 0, gossipd_new_blockheight_reply, int2ptr(blockheight));
+}
+
+/**
+ * gossip_scid_watch_found - bwatch handler: a watched SCID output was confirmed.
+ * Owner prefix: "gossip/<scid>" (e.g. "gossip/539268x845x1")
+ *
+ * Fires when bwatch sees the funding transaction for a channel announcement.
+ * Extracts script and amount from the tx output and sends get_txout_reply to gossipd.
+ */
+void gossip_scid_watch_found(struct lightningd *ld,
+			     const char *suffix,
+			     const struct bitcoin_tx *tx,
+			     size_t outnum,
+			     u32 blockheight UNUSED,
+			     u32 txindex UNUSED)
+{
+	struct short_channel_id scid;
+	struct amount_asset asset;
+	struct amount_sat sat;
+	const u8 *script;
+
+	if (!short_channel_id_from_str(suffix, strlen(suffix), &scid)) {
+		log_broken(ld->log,
+			   "gossip/: invalid scid suffix '%s'", suffix);
+		return;
+	}
+
+	if (!ld->gossip)
+		return;
+
+	/* Extract script and satoshis directly from the confirmed tx output. */
+	asset = bitcoin_tx_output_get_amount(tx, outnum);
+	sat = amount_asset_to_sat(&asset);
+	script = tal_dup_arr(tmpctx, u8,
+			     tx->wtx->outputs[outnum].script,
+			     tx->wtx->outputs[outnum].script_len, 0);
+
+	subd_send_msg(ld->gossip,
+		      take(towire_gossipd_get_txout_reply(NULL, scid, sat, script)));
 }
 
 void gossip_notify_new_block(struct lightningd *ld)

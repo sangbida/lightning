@@ -145,7 +145,7 @@ void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
  * Owner prefix: "channel/wrong_funding_spent/<dbid>"
  */
 void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
-					     u32 dbid,
+					     const char *suffix,
 					     const struct bitcoin_tx *tx,
 					     size_t innum,
 					     u32 blockheight,
@@ -162,7 +162,7 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
  * All other rogue-inflight txid watches are cancelled immediately (one-shot).
  */
 void channel_rogue_inflight_watch_found(struct lightningd *ld,
-					u32 dbid,
+					const char *suffix,
 					const struct bitcoin_tx *tx,
 					size_t outnum,
 					u32 blockheight,
@@ -176,7 +176,7 @@ void channel_rogue_inflight_watch_found(struct lightningd *ld,
  * Drives first-confirmation logic and installs the outpoint spend watch.
  */
 void channel_funding_watch_found(struct lightningd *ld,
-				 u32 dbid,
+				 const char *suffix,
 				 const struct bitcoin_tx *tx,
 				 size_t outnum,
 				 u32 blockheight,
@@ -190,7 +190,7 @@ void channel_funding_watch_found(struct lightningd *ld,
  * Drives onchaind startup (equivalent to the old funding_spent txowatch callback).
  */
 void channel_funding_spent_watch_found(struct lightningd *ld,
-				       u32 dbid,
+				       const char *suffix,
 				       const struct bitcoin_tx *tx,
 				       size_t innum,
 				       u32 blockheight,

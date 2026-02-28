@@ -10,8 +10,7 @@ void bwatch_send_watch_found(struct command *cmd,
 			     u32 blockheight,
 			     const struct watch *w,
 			     u32 txindex,
-			     u32 outnum,
-			     u32 innum);
+			     u32 index);
 
 /* Send block_processed notification to watchman */
 void bwatch_send_block_processed(struct command *cmd, u32 blockheight);

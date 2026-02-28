@@ -2012,15 +2012,10 @@ void migrate_setup_coinmoves(struct lightningd *ld, struct db *db);
 
 /**
  * wallet_watch_p2wpkh - Handler for P2WPKH scriptpubkey watch_found notifications
- * @ld: lightningd instance
- * @keyindex: the wallet keyindex that was watched
- * @tx: the transaction that matched
- * @outnum: which output to check
- * @blockheight: the block height where tx was found
- * @txindex: position of tx in block (0 = coinbase)
+ * Owner prefix: "wallet/p2wpkh/<keyindex>"
  */
 void wallet_watch_p2wpkh(struct lightningd *ld,
-			 u32 keyindex,
+			 const char *suffix,
 			 const struct bitcoin_tx *tx,
 			 size_t outnum,
 			 u32 blockheight,
@@ -2028,9 +2023,10 @@ void wallet_watch_p2wpkh(struct lightningd *ld,
 
 /**
  * wallet_watch_p2tr - Handler for P2TR scriptpubkey watch_found notifications
+ * Owner prefix: "wallet/p2tr/<keyindex>"
  */
 void wallet_watch_p2tr(struct lightningd *ld,
-		       u32 keyindex,
+		       const char *suffix,
 		       const struct bitcoin_tx *tx,
 		       size_t outnum,
 		       u32 blockheight,
@@ -2038,9 +2034,10 @@ void wallet_watch_p2tr(struct lightningd *ld,
 
 /**
  * wallet_watch_p2sh_p2wpkh - Handler for P2SH-wrapped P2WPKH watch_found notifications
+ * Owner prefix: "wallet/p2sh_p2wpkh/<keyindex>"
  */
 void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
-			      u32 keyindex,
+			      const char *suffix,
 			      const struct bitcoin_tx *tx,
 			      size_t outnum,
 			      u32 blockheight,

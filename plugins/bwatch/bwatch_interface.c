@@ -37,8 +37,7 @@ void bwatch_send_watch_found(struct command *cmd,
 			     u32 blockheight,
 			     const struct watch *w,
 			     u32 txindex,
-			     u32 outnum,
-			     u32 innum)
+			     u32 index)
 {
 	struct out_req *req;
 
@@ -47,31 +46,8 @@ void bwatch_send_watch_found(struct command *cmd,
 	json_add_tx(req->js, "tx", tx);
 	json_add_u32(req->js, "blockheight", blockheight);
 	json_add_u32(req->js, "txindex", txindex);
-
-	/* Add type and corresponding field */
-	switch (w->type) {
-	case WATCH_TXID:
-		json_add_string(req->js, "type", "txid");
-		json_add_txid(req->js, "txid", &w->key.txid);
-		assert(outnum == UINT32_MAX);
-		assert(innum == UINT32_MAX);
-		break;
-	case WATCH_SCRIPTPUBKEY:
-		json_add_string(req->js, "type", "scriptpubkey");
-		json_add_hex(req->js, "scriptpubkey", w->key.scriptpubkey.script,
-			     w->key.scriptpubkey.len);
-		assert(outnum != UINT32_MAX);
-		assert(innum == UINT32_MAX);
-		json_add_u32(req->js, "outnum", outnum);
-		break;
-	case WATCH_OUTPOINT:
-		json_add_string(req->js, "type", "outpoint");
-		json_add_outpoint(req->js, "outpoint", &w->key.outpoint);
-		assert(outnum == UINT32_MAX);
-		assert(innum != UINT32_MAX);
-		json_add_u32(req->js, "innum", innum);
-		break;
-	}
+	if (index != UINT32_MAX)
+		json_add_u32(req->js, "index", index);
 
 	/* Add owners array */
 	json_array_start(req->js, "owners");
@@ -152,9 +128,11 @@ static struct command_result *param_watch_type(struct command *cmd, const char *
 		*type = WATCH_OUTPOINT;
 	else if (json_tok_streq(buffer, tok, "txid"))
 		*type = WATCH_TXID;
+	else if (json_tok_streq(buffer, tok, "scid"))
+		*type = WATCH_SCID;
 	else {
 		return command_fail_badparam(cmd, name, buffer, tok,
-					     "should be scriptpubkey, outpoint or txid");
+					     "should be scriptpubkey, outpoint, txid or scid");
 	}
 	return NULL;
 }
@@ -163,32 +141,41 @@ static struct command_result *check_type_params(struct command *cmd,
 						enum watch_type type,
 						const struct bitcoin_outpoint *outpoint,
 						const u8 *scriptpubkey,
-						const struct bitcoin_txid *txid)
+						const struct bitcoin_txid *txid,
+						const struct short_channel_id *scid)
 {
 	switch (type) {
 	case WATCH_SCRIPTPUBKEY:
 		if (!scriptpubkey)
 			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
 					    "scriptpubkey required for type 'scriptpubkey'");
-		if (outpoint || txid)
+		if (outpoint || txid || scid)
 			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-					    "no outpoint or txid for type 'scriptpubkey'");
+					    "no outpoint, txid or scid for type 'scriptpubkey'");
 		return NULL;
 	case WATCH_OUTPOINT:
 		if (!outpoint)
 			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
 					    "outpoint required for type 'outpoint'");
-		if (scriptpubkey || txid)
+		if (scriptpubkey || txid || scid)
 			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-					    "no scriptpubkey or txid for type 'outpoint'");
+					    "no scriptpubkey, txid or scid for type 'outpoint'");
 		return NULL;
 	case WATCH_TXID:
 		if (!txid)
 			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
 					    "txid required for type 'txid'");
-		if (outpoint || scriptpubkey)
+		if (outpoint || scriptpubkey || scid)
 			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-					    "no outpoint or scriptpubkey for type 'txid'");
+					    "no outpoint, scriptpubkey or scid for type 'txid'");
+		return NULL;
+	case WATCH_SCID:
+		if (!scid)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "scid required for type 'scid'");
+		if (outpoint || scriptpubkey || txid)
+			return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+					    "no outpoint, scriptpubkey or txid for type 'scid'");
 		return NULL;
 	}
 	abort();
@@ -205,6 +192,7 @@ struct command_result *json_bwatch_add(struct command *cmd,
 	u8 *scriptpubkey;
 	struct bitcoin_outpoint *outpoint;
 	struct bitcoin_txid *txid;
+	struct short_channel_id *scid;
 	struct watch *w;
 	enum watch_type type;
 	struct command_result *res;
@@ -216,10 +204,11 @@ struct command_result *json_bwatch_add(struct command *cmd,
 			 p_opt("outpoint", param_outpoint, &outpoint),
 			 p_opt("scriptpubkey", param_bin_from_hex, &scriptpubkey),
 			 p_opt("txid", param_txid, &txid),
+			 p_opt("scid", param_short_channel_id, &scid),
 			 NULL))
 		return command_param_failed();
 
-	res = check_type_params(cmd, type, outpoint, scriptpubkey, txid);
+	res = check_type_params(cmd, type, outpoint, scriptpubkey, txid, scid);
 	if (res)
 		return res;
 
@@ -231,6 +220,7 @@ struct command_result *json_bwatch_add(struct command *cmd,
 			     outpoint,
 			     scriptpubkey,
 			     txid,
+			     scid,
 			     *start_block,
 			     owner);
 
@@ -254,6 +244,7 @@ struct command_result *json_bwatch_del(struct command *cmd,
 	u8 *scriptpubkey;
 	struct bitcoin_outpoint *outpoint;
 	struct bitcoin_txid *txid;
+	struct short_channel_id *scid;
 	enum watch_type type;
 	struct command_result *res;
 
@@ -263,17 +254,18 @@ struct command_result *json_bwatch_del(struct command *cmd,
 			 p_opt("outpoint", param_outpoint, &outpoint),
 			 p_opt("scriptpubkey", param_bin_from_hex, &scriptpubkey),
 			 p_opt("txid", param_txid, &txid),
+			 p_opt("scid", param_short_channel_id, &scid),
 			 NULL))
 		return command_param_failed();
 
-	res = check_type_params(cmd, type, outpoint, scriptpubkey, txid);
+	res = check_type_params(cmd, type, outpoint, scriptpubkey, txid, scid);
 	if (res)
 		return res;
 
 	if (command_check_only(cmd))
 		return command_check_done(cmd);
 
-	bwatch_del_watch(cmd, bwatch, type, outpoint, scriptpubkey, txid, owner);
+	bwatch_del_watch(cmd, bwatch, type, outpoint, scriptpubkey, txid, scid, owner);
 	
 	/* Datastore operation completed synchronously */
 	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
@@ -334,6 +326,7 @@ struct command_result *json_bwatch_list(struct command *cmd,
 	struct scriptpubkey_watches_iter sit;
 	struct outpoint_watches_iter oit;
 	struct txid_watches_iter tit;
+	struct scid_watches_iter scit;
 
 	if (!param(cmd, buffer, params, NULL))
 		return command_param_failed();
@@ -368,6 +361,17 @@ struct command_result *json_bwatch_list(struct command *cmd,
 		json_out_watch_common(jout, w->type, w->start_block, w->owners);
 		json_out_end(jout, '}');
 		w = txid_watches_next(bwatch->txid_watches, &tit);
+	}
+
+	w = scid_watches_first(bwatch->scid_watches, &scit);
+	while (w) {
+		json_out_start(jout, NULL, '{');
+		json_out_add(jout, "blockheight", false, "%u", short_channel_id_blocknum(w->key.scid));
+		json_out_add(jout, "txindex", false, "%u", short_channel_id_txnum(w->key.scid));
+		json_out_add(jout, "outnum", false, "%u", short_channel_id_outnum(w->key.scid));
+		json_out_watch_common(jout, w->type, w->start_block, w->owners);
+		json_out_end(jout, '}');
+		w = scid_watches_next(bwatch->scid_watches, &scit);
 	}
 
 	json_out_end(jout, ']');

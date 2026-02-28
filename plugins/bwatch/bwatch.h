@@ -3,6 +3,7 @@
 
 #include "config.h"
 #include <bitcoin/block.h>
+#include <bitcoin/short_channel_id.h>
 #include <bitcoin/tx.h>
 #include <plugins/libplugin.h>
 #include <wire/wire.h>
@@ -11,12 +12,14 @@
 struct scriptpubkey_watches;
 struct outpoint_watches;
 struct txid_watches;
+struct scid_watches;
 
 /* Watch type enumeration */
 enum watch_type {
 	WATCH_SCRIPTPUBKEY,
 	WATCH_OUTPOINT,
-	WATCH_TXID
+	WATCH_TXID,
+	WATCH_SCID
 };
 
 /* Scriptpubkey wrapper for easier handling */
@@ -34,6 +37,7 @@ struct watch {
 		struct scriptpubkey scriptpubkey;
 		struct bitcoin_outpoint outpoint;
 		struct bitcoin_txid txid;
+		struct short_channel_id scid;
 	} key;
 };
 
@@ -48,6 +52,7 @@ struct bwatch {
 	struct scriptpubkey_watches *scriptpubkey_watches;
 	struct outpoint_watches *outpoint_watches;
 	struct txid_watches *txid_watches;
+	struct scid_watches *scid_watches;
 
 	/* Polling */
 	u32 poll_interval_ms;  /* Milliseconds between chain polls */

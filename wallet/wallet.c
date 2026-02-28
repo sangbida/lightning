@@ -3517,35 +3517,35 @@ static void wallet_watch_scriptpubkey_common(struct lightningd *ld,
 }
 
 void wallet_watch_p2wpkh(struct lightningd *ld,
-			 u32 keyindex,
+			 const char *suffix,
 			 const struct bitcoin_tx *tx,
 			 size_t outnum,
 			 u32 blockheight,
 			 u32 txindex)
 {
-	wallet_watch_scriptpubkey_common(ld, keyindex, ADDR_BECH32, 
+	wallet_watch_scriptpubkey_common(ld, atoi(suffix), ADDR_BECH32,
 					 tx, outnum, blockheight, txindex);
 }
 
 void wallet_watch_p2tr(struct lightningd *ld,
-		       u32 keyindex,
+		       const char *suffix,
 		       const struct bitcoin_tx *tx,
 		       size_t outnum,
 		       u32 blockheight,
 		       u32 txindex)
 {
-	wallet_watch_scriptpubkey_common(ld, keyindex, ADDR_P2TR,
+	wallet_watch_scriptpubkey_common(ld, atoi(suffix), ADDR_P2TR,
 					 tx, outnum, blockheight, txindex);
 }
 
 void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
-			      u32 keyindex,
+			      const char *suffix,
 			      const struct bitcoin_tx *tx,
 			      size_t outnum,
 			      u32 blockheight,
 			      u32 txindex)
 {
-	wallet_watch_scriptpubkey_common(ld, keyindex, ADDR_P2SH_SEGWIT,
+	wallet_watch_scriptpubkey_common(ld, atoi(suffix), ADDR_P2SH_SEGWIT,
 					 tx, outnum, blockheight, txindex);
 }
 

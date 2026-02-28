@@ -15,7 +15,7 @@ void onchaind_restart_closed_channels(struct lightningd *ld);
 
 /** bwatch handler: "onchaind/txid/<dbid>" — txid confirmed, send depth to onchaind. */
 void onchaind_tx_watch_found(struct lightningd *ld,
-			     u32 dbid,
+			     const char *suffix,
 			     const struct bitcoin_tx *tx,
 			     size_t outnum,
 			     u32 blockheight,
@@ -23,7 +23,7 @@ void onchaind_tx_watch_found(struct lightningd *ld,
 
 /** bwatch handler: "onchaind/outpoint/<dbid>" — output spent, notify onchaind. */
 void onchaind_output_watch_found(struct lightningd *ld,
-				 u32 dbid,
+				 const char *suffix,
 				 const struct bitcoin_tx *tx,
 				 size_t innum,
 				 u32 blockheight,

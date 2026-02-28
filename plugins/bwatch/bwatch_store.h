@@ -25,6 +25,10 @@ const struct bitcoin_txid *txid_watch_keyof(const struct watch *w);
 size_t txid_hash(const struct bitcoin_txid *txid);
 bool txid_watch_eq(const struct watch *w, const struct bitcoin_txid *txid);
 
+const struct short_channel_id *scid_watch_keyof(const struct watch *w);
+size_t scid_hash(const struct short_channel_id *scid);
+bool scid_watch_eq(const struct watch *w, const struct short_channel_id *scid);
+
 /* Define hash table types */
 HTABLE_DEFINE_NODUPS_TYPE(struct watch, scriptpubkey_watch_keyof,
 			  scriptpubkey_hash, scriptpubkey_watch_eq,
@@ -37,6 +41,10 @@ HTABLE_DEFINE_NODUPS_TYPE(struct watch, outpoint_watch_keyof,
 HTABLE_DEFINE_NODUPS_TYPE(struct watch, txid_watch_keyof,
 			  txid_hash, txid_watch_eq,
 			  txid_watches);
+
+HTABLE_DEFINE_NODUPS_TYPE(struct watch, scid_watch_keyof,
+			  scid_hash, scid_watch_eq,
+			  scid_watches);
 
 /*
  * ============================================================================
@@ -61,7 +69,8 @@ struct watch *bwatch_get_watch(struct bwatch *bwatch,
 			       enum watch_type type,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
-			       const struct bitcoin_txid *txid);
+			       const struct bitcoin_txid *txid,
+			       const struct short_channel_id *scid);
 void bwatch_remove_watch_from_hash(struct bwatch *bwatch, struct watch *w);
 
 /* Watch datastore operations */
@@ -76,6 +85,7 @@ struct watch *bwatch_add_watch(struct command *cmd,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
 			       const struct bitcoin_txid *txid,
+			       const struct short_channel_id *scid,
 			       u32 start_block,
 			       const char *owner_id);
 
@@ -85,6 +95,7 @@ void bwatch_del_watch(struct command *cmd,
 		      const struct bitcoin_outpoint *outpoint,
 		      const u8 *scriptpubkey,
 		      const struct bitcoin_txid *txid,
+		      const struct short_channel_id *scid,
 		      const char *owner_id);
 
 /* Utxoset (replaces wallet utxoset table) */
