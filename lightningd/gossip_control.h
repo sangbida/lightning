@@ -25,11 +25,9 @@ void gossip_notify_new_block(struct lightningd *ld);
 void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight);
 
 /**
- * gossip_scid_watch_found - bwatch handler: a watched SCID output was confirmed.
- * Owner prefix: "gossip/<scid>" (e.g. "gossip/539268x845x1")
- *
- * Extracts script and amount from the confirmed tx output and sends
- * get_txout_reply to gossipd, completing a pending get_txout request.
+ * gossip_scid_watch_found - bwatch handler for gossip/ owner prefix.
+ * Handles both SCID confirmation (get_txout_reply) and funding spend
+ * (gossipd_notify_spends) based on whether blockheight matches the SCID.
  */
 void gossip_scid_watch_found(struct lightningd *ld,
 			     const char *suffix,

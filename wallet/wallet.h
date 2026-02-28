@@ -46,10 +46,6 @@ struct wallet {
 	 * including all spent ones */
 	struct outpointfilter *owned_outpoints;
 
-	/* Filter matching all outpoints that might be a funding transaction on
-	 * the blockchain. This is currently all P2WSH outputs */
-	struct outpointfilter *utxoset_outpoints;
-
 	/* Our issued wallet addresses.  We update on lookup. */
 	u32 our_addresses_maxindex;
 	struct wallet_address_htable *our_addresses;
@@ -390,15 +386,6 @@ struct wallet_payment {
 
 	/* If we are associated with an internal invoice_request */
 	struct sha256 *local_invreq_id;
-};
-
-struct outpoint {
-	struct bitcoin_outpoint outpoint;
-	u32 blockheight;
-	u32 txindex;
-	struct amount_sat sat;
-	u8 *scriptpubkey;
-	u32 spendheight;
 };
 
 struct channeltx {
@@ -1181,63 +1168,18 @@ bool wallet_sanity_check(struct wallet *w);
 
 
 /**
- * wallet_utxoset_refresh_filters - Rebuild outpoint filters from the utxoset table.
- * Called after a reorg removes blocks, so we rewatch UTXOs that are no longer spent.
- */
-void wallet_utxoset_refresh_filters(struct wallet *w);
-
-/**
  * Return whether we have a block for the given height.
  */
 bool wallet_have_block(struct wallet *w, u32 blockheight);
 
 /**
- * Mark an outpoint as spent, both in the owned as well as the UTXO set
- *
- * Given the outpoint (txid, outnum), and the blockheight, mark the
- * corresponding DB entries as spent at the blockheight.
+ * Check whether an outpoint is in our wallet's owned output set.
  *
  * @return true if found in our wallet's output set, false otherwise
  */
 bool wallet_outpoint_spend(const tal_t *ctx, struct wallet *w,
 			   const u32 blockheight,
 			   const struct bitcoin_outpoint *outpoint);
-
-struct outpoint *wallet_outpoint_for_scid(const tal_t *ctx, struct wallet *w,
-					  struct short_channel_id scid);
-
-void wallet_utxoset_add(struct wallet *w,
-			const struct bitcoin_outpoint *outpoint,
-			const u32 blockheight, const u32 txindex,
-			const u8 *scriptpubkey, size_t scriptpubkey_len,
-			struct amount_sat sat);
-
-/**
- * Retrieve all UTXO entries that were spent by the given blockheight.
- *
- * This allows us to retrieve any UTXO entries that were spent by a block,
- * after the block has been processed. It's main use is to be able to tell
- * `gossipd` about potential channel outpoints being spent, without having to
- * track all outpoints in memory.
- *
- * In order to return correct results `blockheight` should not be called with
- * a height below the UTXO set pruning height (see `UTXO_PRUNE_DEPTH` for the
- * current value).
- */
-const struct short_channel_id *
-wallet_utxoset_get_spent(const tal_t *ctx, struct wallet *w, u32 blockheight);
-
-/* Prune all UTXO entries spent (far) below this block height */
-void wallet_utxoset_prune(struct wallet *w, u32 blockheight);
-
-/* Get oldest spendheight (or 0 if none), to catch up */
-u32 wallet_utxoset_oldest_spentheight(const tal_t *ctx, struct wallet *w);
-
-/**
- * Retrieve all UTXO entries that were created at a given blockheight.
- */
-const struct short_channel_id *
-wallet_utxoset_get_created(const tal_t *ctx, struct wallet *w, u32 blockheight);
 
 void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
 			    const u32 blockheight, const u32 txindex);
@@ -1369,13 +1311,6 @@ void wallet_remote_ann_sigs_clear(struct wallet *w, const struct channel *chan);
  * @return A tal_arr of wallet annotated transactions
  */
 struct wallet_transaction *wallet_transactions_get(const tal_t *ctx, struct wallet *w);
-
-/**
- * Add a filteredblock to the blocks and utxoset tables.
- *
- * This can be used to backfill the blocks and still unspent UTXOs that were before our wallet birth height.
- */
-void wallet_filteredblock_add(struct wallet *w, const struct filteredblock *fb);
 
 /**
  * Store a penalty base in the database.

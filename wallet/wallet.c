@@ -42,9 +42,6 @@
 #define SQLITE_MAX_UINT 0x7FFFFFFFFFFFFFFF
 #define DIRECTION_INCOMING 0
 #define DIRECTION_OUTGOING 1
-/* How many blocks must a UTXO entry be buried under to be considered old enough
- * to prune? */
-#define UTXO_PRUNE_DEPTH 144
 
 /* 12 hours is usually enough reservation time */
 #define RESERVATION_INC (6 * 12)
@@ -249,30 +246,6 @@ static void our_addresses_init(struct wallet *w)
 	w->our_addresses_maxindex = w->keyscan_gap;
 }
 
-/* Idempotent: outpointfilter_add is a noop if it already exists. */
-static void refill_outpointfilters(struct wallet *w)
-{
-	struct db_stmt *stmt;
-
-	stmt = db_prepare_v2(
-	    w->db,
-	    SQL("SELECT txid, outnum FROM utxoset WHERE spendheight is NULL"));
-	db_query_prepared(stmt);
-
-	while (db_step(stmt)) {
-		struct bitcoin_outpoint outpoint;
-		db_col_txid(stmt, "txid", &outpoint.txid);
-		outpoint.n = db_col_int(stmt, "outnum");
-		outpointfilter_add(w->utxoset_outpoints, &outpoint);
-	}
-	tal_free(stmt);
-}
-
-void wallet_utxoset_refresh_filters(struct wallet *w)
-{
-	refill_outpointfilters(w);
-}
-
 static void outpointfilters_init(struct wallet *w)
 {
 	struct utxo **utxos = wallet_get_all_utxos(NULL, w);
@@ -282,9 +255,6 @@ static void outpointfilters_init(struct wallet *w)
 		outpointfilter_add(w->owned_outpoints, &utxos[i]->outpoint);
 
 	tal_free(utxos);
-
-	w->utxoset_outpoints = outpointfilter_new(w);
-	refill_outpointfilters(w);
 }
 
 struct wallet *wallet_new(struct lightningd *ld, struct timers *timers)
@@ -5007,58 +4977,14 @@ bool wallet_sanity_check(struct wallet *w)
 	return true;
 }
 
-/**
- * wallet_utxoset_prune -- Remove spent UTXO entries that are old
- */
-void wallet_utxoset_prune(struct wallet *w, u32 blockheight)
-{
-	struct db_stmt *stmt;
-
-	stmt = db_prepare_v2(
-	    w->db,
-	    SQL("SELECT txid, outnum FROM utxoset WHERE spendheight < ?"));
-	db_bind_int(stmt, blockheight - UTXO_PRUNE_DEPTH);
-	db_query_prepared(stmt);
-
-	while (db_step(stmt)) {
-		struct bitcoin_outpoint outpoint;
-		db_col_txid(stmt, "txid", &outpoint.txid);
-		outpoint.n = db_col_int(stmt, "outnum");
-		outpointfilter_remove(w->utxoset_outpoints, &outpoint);
-	}
-	tal_free(stmt);
-
-	stmt = db_prepare_v2(w->db,
-			     SQL("DELETE FROM utxoset WHERE spendheight < ?"));
-	db_bind_int(stmt, blockheight - UTXO_PRUNE_DEPTH);
-	db_exec_prepared_v2(take(stmt));
-}
 
 
 bool wallet_outpoint_spend(const tal_t *ctx, struct wallet *w, const u32 blockheight,
 			   const struct bitcoin_outpoint *outpoint)
 {
-	bool our_spend;
-
 	(void)ctx;
-	/* Our owned outputs: bwatch tracks spends when it processes blocks.
-	 * We still check owned_outpoints so record_wallet_spend gets called. */
-	our_spend = outpointfilter_matches(w->owned_outpoints, outpoint);
-
-	/* P2WSH utxoset (channel tracking) - still in wallet DB for now */
-	if (outpointfilter_matches(w->utxoset_outpoints, outpoint)) {
-		struct db_stmt *stmt = db_prepare_v2(w->db, SQL("UPDATE utxoset "
-						"SET spendheight = ? "
-						"WHERE txid = ?"
-						" AND outnum = ?"));
-
-		db_bind_int(stmt, blockheight);
-		db_bind_txid(stmt, &outpoint->txid);
-		db_bind_int(stmt, outpoint->n);
-		db_exec_prepared_v2(stmt);
-		tal_free(stmt);
-	}
-	return our_spend;
+	(void)blockheight;
+	return outpointfilter_matches(w->owned_outpoints, outpoint);
 }
 
 void wallet_record_spend(struct lightningd *ld,
@@ -5106,74 +5032,6 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 		wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
 }
 
-void wallet_utxoset_add(struct wallet *w,
-			const struct bitcoin_outpoint *outpoint,
-			const u32 blockheight, const u32 txindex,
-			const u8 *scriptpubkey, size_t scriptpubkey_len,
-			struct amount_sat sat)
-{
-	struct db_stmt *stmt;
-
-	stmt = db_prepare_v2(w->db, SQL("INSERT INTO utxoset ("
-					" txid,"
-					" outnum,"
-					" blockheight,"
-					" spendheight,"
-					" txindex,"
-					" scriptpubkey,"
-					" satoshis"
-					") VALUES(?, ?, ?, ?, ?, ?, ?);"));
-	db_bind_txid(stmt, &outpoint->txid);
-	db_bind_int(stmt, outpoint->n);
-	db_bind_int(stmt, blockheight);
-	db_bind_null(stmt);
-	db_bind_int(stmt, txindex);
-	db_bind_blob(stmt, scriptpubkey, scriptpubkey_len);
-	db_bind_amount_sat(stmt, sat);
-	db_exec_prepared_v2(take(stmt));
-
-	outpointfilter_add(w->utxoset_outpoints, outpoint);
-}
-
-void wallet_filteredblock_add(struct wallet *w, const struct filteredblock *fb)
-{
-	struct db_stmt *stmt;
-	if (wallet_have_block(w, fb->height))
-		return;
-
-	stmt = db_prepare_v2(w->db, SQL("INSERT INTO blocks "
-					"(height, hash, prev_hash) "
-					"VALUES (?, ?, ?);"));
-	db_bind_int(stmt, fb->height);
-	db_bind_sha256d(stmt, &fb->id.shad);
-	db_bind_sha256d(stmt, &fb->prev_hash.shad);
-	db_exec_prepared_v2(take(stmt));
-
-	for (size_t i = 0; i < tal_count(fb->outpoints); i++) {
-		struct filteredblock_outpoint *o = fb->outpoints[i];
-		stmt =
-		    db_prepare_v2(w->db, SQL("INSERT INTO utxoset ("
-					     " txid,"
-					     " outnum,"
-					     " blockheight,"
-					     " spendheight,"
-					     " txindex,"
-					     " scriptpubkey,"
-					     " satoshis"
-					     ") VALUES(?, ?, ?, ?, ?, ?, ?);"));
-		db_bind_txid(stmt, &o->outpoint.txid);
-		db_bind_int(stmt, o->outpoint.n);
-		db_bind_int(stmt, fb->height);
-		db_bind_null(stmt);
-		db_bind_int(stmt, o->txindex);
-		db_bind_talarr(stmt, o->scriptPubKey);
-		db_bind_amount_sat(stmt, o->amount);
-		db_exec_prepared_v2(take(stmt));
-
-		outpointfilter_add(w->utxoset_outpoints, &o->outpoint);
-	}
-}
-
 bool wallet_have_block(struct wallet *w, u32 blockheight)
 {
 	bool result;
@@ -5186,123 +5044,6 @@ bool wallet_have_block(struct wallet *w, u32 blockheight)
 		db_col_ignore(stmt, "height");
 	tal_free(stmt);
 	return result;
-}
-
-struct outpoint *wallet_outpoint_for_scid(const tal_t *ctx, struct wallet *w,
-					  struct short_channel_id scid)
-{
-	struct db_stmt *stmt;
-	struct outpoint *op;
-	stmt = db_prepare_v2(w->db, SQL("SELECT"
-					" txid,"
-					" spendheight,"
-					" scriptpubkey,"
-					" satoshis "
-					"FROM utxoset "
-					"WHERE blockheight = ?"
-					" AND txindex = ?"
-					" AND outnum = ?"
-					" AND spendheight IS NULL"));
-	db_bind_int(stmt, short_channel_id_blocknum(scid));
-	db_bind_int(stmt, short_channel_id_txnum(scid));
-	db_bind_int(stmt, short_channel_id_outnum(scid));
-	db_query_prepared(stmt);
-
-	if (!db_step(stmt)) {
-		tal_free(stmt);
-		return NULL;
-	}
-
-	op = tal(ctx, struct outpoint);
-	op->blockheight = short_channel_id_blocknum(scid);
-	op->txindex = short_channel_id_txnum(scid);
-	op->outpoint.n = short_channel_id_outnum(scid);
-	db_col_txid(stmt, "txid", &op->outpoint.txid);
-	if (db_col_is_null(stmt, "spendheight"))
-		op->spendheight = 0;
-	else
-		op->spendheight = db_col_int(stmt, "spendheight");
-	op->scriptpubkey = db_col_arr(op, stmt, "scriptpubkey", u8);
-	op->sat = db_col_amount_sat(stmt, "satoshis");
-	tal_free(stmt);
-
-	return op;
-}
-
-/* Turns "SELECT blockheight, txindex, outnum" into scids */
-static const struct short_channel_id *db_scids(const tal_t *ctx,
-					       struct db_stmt *stmt STEALS)
-{
-	struct short_channel_id *res = tal_arr(ctx, struct short_channel_id, 0);
-
-	while (db_step(stmt)) {
-		struct short_channel_id scid;
-		u64 blocknum, txnum, outnum;
-		bool ok;
-		blocknum = db_col_int(stmt, "blockheight");
-		txnum = db_col_int(stmt, "txindex");
-		outnum = db_col_int(stmt, "outnum");
-		ok = mk_short_channel_id(&scid, blocknum, txnum, outnum);
-
-		assert(ok);
-		tal_arr_expand(&res, scid);
-	}
-	tal_free(stmt);
-	return res;
-}
-
-const struct short_channel_id *
-wallet_utxoset_get_spent(const tal_t *ctx, struct wallet *w,
-			 u32 blockheight)
-{
-	struct db_stmt *stmt;
-	stmt = db_prepare_v2(w->db, SQL("SELECT"
-					" blockheight,"
-					" txindex,"
-					" outnum "
-					"FROM utxoset "
-					"WHERE spendheight = ?"));
-	db_bind_int(stmt, blockheight);
-	db_query_prepared(stmt);
-
-	return db_scids(ctx, stmt);
-}
-
-u32 wallet_utxoset_oldest_spentheight(const tal_t *ctx, struct wallet *w)
-{
-	struct db_stmt *stmt;
-	u32 height;
-	stmt = db_prepare_v2(w->db, SQL("SELECT"
-					" spendheight "
-					"FROM utxoset "
-					"WHERE spendheight IS NOT NULL "
-					"ORDER BY spendheight ASC "
-					"LIMIT 1"));
-	db_query_prepared(stmt);
-
-	if (db_step(stmt))
-		height = db_col_int(stmt, "spendheight");
-	else
-		height = 0;
-	tal_free(stmt);
-	return height;
-}
-
-const struct short_channel_id *
-wallet_utxoset_get_created(const tal_t *ctx, struct wallet *w,
-			   u32 blockheight)
-{
-	struct db_stmt *stmt;
-	stmt = db_prepare_v2(w->db, SQL("SELECT"
-					" blockheight,"
-					" txindex,"
-					" outnum "
-					"FROM utxoset "
-					"WHERE blockheight = ?"));
-	db_bind_int(stmt, blockheight);
-	db_query_prepared(stmt);
-
-	return db_scids(ctx, stmt);
 }
 
 void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,

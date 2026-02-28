@@ -12,7 +12,6 @@
 #include <lightningd/channel.h>
 #include <lightningd/coin_mvts.h>
 #include <lightningd/feerate.h>
-#include <lightningd/gossip_control.h>
 #include <lightningd/io_loop_with_timers.h>
 #include <lightningd/notification.h>
 #include <lightningd/watchman.h>
@@ -734,69 +733,6 @@ static void updates_complete(struct chain_topology *topo)
 	next_topology_timer(topo);
 }
 
-/**
- * topo_update_spends -- Tell the wallet about spent outpoints (utxoset only)
- *
- * Wallet-owned output spends are now notified by bwatch via wallet/utxo/
- * watch_found. We only update utxoset (P2WSH channel tracking) and
- * notify gossipd of channel closes here.
- */
-static void topo_update_spends(struct chain_topology *topo,
-			       struct bitcoin_tx **txs,
-			       const struct bitcoin_txid *txids,
-			       u32 blockheight)
-{
-	const struct short_channel_id *spent_scids;
-	const size_t num_txs = tal_count(txs);
-
-	/* Update utxoset spend heights (P2WSH channel outputs) */
-	for (size_t i = 0; i < num_txs; i++) {
-		const struct bitcoin_tx *tx = txs[i];
-
-		for (size_t j = 0; j < tx->wtx->num_inputs; j++) {
-			struct bitcoin_outpoint outpoint;
-
-			bitcoin_tx_input_get_outpoint(tx, j, &outpoint);
-			wallet_outpoint_spend(tmpctx, topo->ld->wallet,
-					     blockheight, &outpoint);
-		}
-	}
-
-	/* Retrieve all potential channel closes from the UTXO set and
-	 * tell gossipd about them. */
-	spent_scids =
-	    wallet_utxoset_get_spent(tmpctx, topo->ld->wallet, blockheight);
-	gossipd_notify_spends(topo->bitcoind->ld, blockheight, spent_scids);
-}
-
-static void topo_add_utxos(struct chain_topology *topo, struct block *b)
-{
-	/* Coinbase and pegin UTXOs can be ignored */
-	const uint32_t skip_features = WALLY_TX_IS_COINBASE | WALLY_TX_IS_PEGIN;
-	const size_t num_txs = tal_count(b->full_txs);
-	for (size_t i = 0; i < num_txs; i++) {
-		const struct bitcoin_tx *tx = b->full_txs[i];
-		for (size_t n = 0; n < tx->wtx->num_outputs; n++) {
-			const struct wally_tx_output *output;
-			output = &tx->wtx->outputs[n];
-			if (output->features & skip_features)
-				continue;
-			if (!is_p2wsh(output->script, output->script_len, NULL))
-				continue; /* We only care about p2wsh utxos */
-
-			struct amount_asset amt = bitcoin_tx_output_get_amount(tx, n);
-			if (!amount_asset_is_main(&amt))
-				continue; /* Ignore non-policy asset outputs */
-
-			struct bitcoin_outpoint outpoint = { b->txids[i], n };
-			wallet_utxoset_add(topo->ld->wallet, &outpoint,
-					   b->height, i,
-					   output->script, output->script_len,
-					   amount_asset_to_sat(&amt));
-		}
-	}
-}
-
 static void add_tip(struct chain_topology *topo, struct block *b)
 {
 	/* Attach to tip; b is now the tip. */
@@ -804,13 +740,6 @@ static void add_tip(struct chain_topology *topo, struct block *b)
 	b->prev = topo->tip;
 	topo->tip->next = b;	/* FIXME this doesn't seem to be used anywhere */
 	topo->tip = b;
-	trace_span_start("topo_add_utxo", b);
-	topo_add_utxos(topo, b);
-	trace_span_end(b);
-
-	trace_span_start("topo_update_spends", b);
-	topo_update_spends(topo, b->full_txs, b->txids, b->height);
-	trace_span_end(b);
 
 	/* Only keep the transactions we care about. */
 	trace_span_start("filter_block_txs", b);
@@ -847,7 +776,6 @@ static struct block *new_block(struct chain_topology *topo,
 static void remove_tip(struct chain_topology *topo)
 {
 	struct block *b = topo->tip;
-	const struct short_channel_id *removed_scids;
 
 	log_debug(topo->log, "Removing stale block %u: %s",
 			  topo->tip->height,
@@ -861,16 +789,10 @@ static void remove_tip(struct chain_topology *topo)
 		      b->height,
 		      fmt_bitcoin_blkid(tmpctx, &b->blkid));
 
-	/* Grab these before we delete block from db */
-	removed_scids = wallet_utxoset_get_created(tmpctx, topo->ld->wallet,
-						   b->height);
-	wallet_utxoset_refresh_filters(topo->ld->wallet);
-
 	block_map_del(topo->block_map, b);
 
-	/* These no longer exist, so gossipd drops any reference to them just
-	 * as if they were spent. */
-	gossipd_notify_spends(topo->bitcoind->ld, b->height, removed_scids);
+	/* TODO: bwatch handles reorg notifications for gossipd via its own
+	 * block removal / rescan logic. */
 	tal_free(b);
 }
 
@@ -1314,9 +1236,7 @@ void setup_topology(struct chain_topology *topo)
 	db_set_intvar(topo->ld->wallet->db,
 		      "last_processed_block", topo->tip->height);
 
-	/* Rollback to the given blockheight, so we start track
-	 * correctly again */
-	wallet_utxoset_refresh_filters(topo->ld->wallet);
+	/* Rollback to the given blockheight */
 
 	db_commit_transaction(topo->ld->wallet->db);
 
@@ -1340,7 +1260,6 @@ static void fixup_scan_block(struct bitcoind *bitcoind,
 	}
 
 	log_debug(topo->ld->log, "fixup_scan: block %u with %zu txs", height, tal_count(blk->tx));
-	topo_update_spends(topo, blk->tx, blk->txids, height);
 
 	/* Caught up. */
 	if (height == get_block_height(topo)) {

@@ -20,41 +20,26 @@
 static void get_txout(struct subd *gossip, const u8 *msg)
 {
 	struct short_channel_id scid;
-	struct outpoint *op;
-	u32 blockheight;
+	u32 blockheight, start_block;
 
 	if (!fromwire_gossipd_get_txout(msg, &scid))
 		fatal("Gossip gave bad GOSSIP_GET_TXOUT message %s",
 		      tal_hex(msg, msg));
 
-	/* FIXME: Block less than 6 deep? */
+	if (gossip->ld->state == LD_STATE_SHUTDOWN)
+		return;
+
+	/* Ask bwatch to look up / watch for this SCID. When confirmed,
+	 * gossip_scid_watch_found replies to gossipd. Bwatch deduplicates
+	 * if already watching, and rescans from start_block for past blocks. */
 	blockheight = short_channel_id_blocknum(scid);
-
-	op = wallet_outpoint_for_scid(tmpctx, gossip->ld->wallet, scid);
-	if (op) {
-		subd_send_msg(gossip,
-			      take(towire_gossipd_get_txout_reply(
-					   NULL, scid, op->sat, op->scriptpubkey)));
-	} else if (wallet_have_block(gossip->ld->wallet, blockheight)) {
-		/* We should have known about this outpoint since its header
-		 * is in the DB. The fact that we don't means that this is
-		 * either a spent outpoint or an invalid one. Return a
-		 * failure. */
-		subd_send_msg(gossip, take(towire_gossipd_get_txout_reply(
-						   NULL, scid, AMOUNT_SAT(0), NULL)));
-	} else {
-		/* If we're shutting down, don't ask plugins */
-		if (gossip->ld->state == LD_STATE_SHUTDOWN)
-			return;
-
-		/* Add scid watch via bwatch; when watch_found fires we reply */
-		u32 start_block = watchman_get_height(gossip->ld);
-		if (blockheight < start_block)
-			start_block = blockheight;
-		watchman_watch_scid(gossip->ld,
-				   tal_fmt(gossip, "gossip/%s", fmt_short_channel_id(gossip, scid)),
-				   &scid, start_block);
-	}
+	start_block = watchman_get_height(gossip->ld);
+	if (blockheight < start_block)
+		start_block = blockheight;
+	watchman_watch_scid(gossip->ld,
+			   tal_fmt(gossip, "gossip/%s",
+				   fmt_short_channel_id(gossip, scid)),
+			   &scid, start_block);
 }
 
 static void handle_init_cupdate(struct lightningd *ld, const u8 *msg)
@@ -184,10 +169,6 @@ static void gossipd_new_blockheight_reply(struct subd *gossipd,
 
 	/* Now, finally update getinfo's blockheight */
 	gossipd->ld->gossip_blockheight = ptr2int(blockheight);
-
-	/* And use that to trim old entries in the UTXO set */
-	wallet_utxoset_prune(gossipd->ld->wallet,
-			     gossipd->ld->gossip_blockheight);
 }
 
 void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight)
@@ -201,23 +182,23 @@ void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight)
 }
 
 /**
- * gossip_scid_watch_found - bwatch handler: a watched SCID output was confirmed.
- * Owner prefix: "gossip/<scid>" (e.g. "gossip/539268x845x1")
+ * gossip_scid_watch_found - bwatch handler for gossip/ owner prefix.
  *
- * Fires when bwatch sees the funding transaction for a channel announcement.
- * Extracts script and amount from the tx output and sends get_txout_reply to gossipd.
+ * Handles two cases with the same owner "gossip/<scid>":
+ * 1. SCID confirmed: bwatch fires the WATCH_SCID, blockheight matches the
+ *    SCID's encoded block. We send get_txout_reply to gossipd.
+ * 2. Funding spent: bwatch auto-created a WATCH_OUTPOINT when the SCID
+ *    confirmed (same owner). When spent, blockheight differs from the SCID's
+ *    block. We notify gossipd that the channel is closed.
  */
 void gossip_scid_watch_found(struct lightningd *ld,
 			     const char *suffix,
 			     const struct bitcoin_tx *tx,
-			     size_t outnum,
-			     u32 blockheight UNUSED,
+			     size_t index,
+			     u32 blockheight,
 			     u32 txindex UNUSED)
 {
 	struct short_channel_id scid;
-	struct amount_asset asset;
-	struct amount_sat sat;
-	const u8 *script;
 
 	if (!short_channel_id_from_str(suffix, strlen(suffix), &scid)) {
 		log_broken(ld->log,
@@ -228,15 +209,23 @@ void gossip_scid_watch_found(struct lightningd *ld,
 	if (!ld->gossip)
 		return;
 
-	/* Extract script and satoshis directly from the confirmed tx output. */
-	asset = bitcoin_tx_output_get_amount(tx, outnum);
-	sat = amount_asset_to_sat(&asset);
-	script = tal_dup_arr(tmpctx, u8,
-			     tx->wtx->outputs[outnum].script,
-			     tx->wtx->outputs[outnum].script_len, 0);
+	if (blockheight == short_channel_id_blocknum(scid)) {
+		/* Case 1: SCID confirmed — reply with output details */
+		struct amount_sat sat;
+		const u8 *script;
 
-	subd_send_msg(ld->gossip,
-		      take(towire_gossipd_get_txout_reply(NULL, scid, sat, script)));
+		bitcoin_tx_output_get_amount_sat(tx, index, &sat);
+		script = tal_dup_arr(tmpctx, u8,
+				     tx->wtx->outputs[index].script,
+				     tx->wtx->outputs[index].script_len, 0);
+
+		subd_send_msg(ld->gossip,
+			      take(towire_gossipd_get_txout_reply(NULL, scid, sat, script)));
+	} else {
+		/* Case 2: Funding output spent — channel closed */
+		gossipd_notify_spends(ld, blockheight,
+				      tal_dup(tmpctx, struct short_channel_id, &scid));
+	}
 }
 
 void gossip_notify_new_block(struct lightningd *ld)
@@ -263,24 +252,16 @@ static void gossipd_init_done(struct subd *gossipd,
 			      void *unused)
 {
 	struct lightningd *ld = gossipd->ld;
-	u32 oldspends;
 
 	/* Any channels without channel_updates, we populate now: gossipd
 	 * might have lost its gossip_store. */
 	channel_gossip_init_done(ld);
 
-	/* Tell it about any closures it might have missed! */
-	oldspends = wallet_utxoset_oldest_spentheight(tmpctx, ld->wallet);
-	if (oldspends) {
-		while (oldspends <= get_block_height(ld->topology)) {
-			const struct short_channel_id *scids;
-
-			scids = wallet_utxoset_get_spent(tmpctx, ld->wallet,
-							 oldspends);
-			gossipd_notify_spends(ld, oldspends, scids);
-			oldspends++;
-		}
-	}
+	/* Closures are now handled by bwatch: WATCH_SCID fires
+	 * gossip_scid_watch_found on confirmation, which auto-creates
+	 * a WATCH_OUTPOINT. When the funding is spent, the same handler
+	 * calls gossipd_notify_spends. Watches are persistent, so no
+	 * replay needed. */
 
 	/* Break out of loop, so we can begin */
 	log_debug(gossipd->ld->log, "io_break: %s", __func__);
