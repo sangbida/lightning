@@ -87,41 +87,6 @@ static enum state_change state_change_in_db(enum state_change s)
 	fatal("%s: %u is invalid", __func__, s);
 }
 
-/* libwally uses pointer/size pairs */
-struct script_with_len {
-	const u8 *script;
-	size_t len;
-};
-
-/* We keep a hash of these, for fast lookup */
-struct wallet_address {
-	u32 index;
-	enum addrtype addrtype;
-	struct script_with_len swl;
-};
-
-static size_t script_with_len_hash(const struct script_with_len *swl)
-{
-	return siphash24(siphash_seed(), swl->script, swl->len);
-}
-
-static const struct script_with_len *wallet_address_keyof(const struct wallet_address *waddr)
-{
-	return &waddr->swl;
-}
-
-static bool wallet_address_eq_scriptpubkey(const struct wallet_address *waddr,
-					   const struct script_with_len *script)
-{
-	return memeq(waddr->swl.script, waddr->swl.len, script->script, script->len);
-}
-
-HTABLE_DEFINE_NODUPS_TYPE(struct wallet_address,
-			  wallet_address_keyof,
-			  script_with_len_hash,
-			  wallet_address_eq_scriptpubkey,
-			  wallet_address_htable);
-
 /* Convert addrtype to string for bwatch owner prefix */
 static const char *wallet_addrtype_to_owner_prefix(enum addrtype addrtype)
 {
@@ -168,84 +133,6 @@ void wallet_add_bwatch_derkey(struct lightningd *ld,
 	wallet_add_bwatch_scriptpubkey(ld, "p2tr", keyindex, start_block, p2tr, tal_bytelen(p2tr));
 }
 
-static void our_addresses_add(struct wallet_address_htable *our_addresses,
-			      u32 index,
-			      const u8 *scriptpubkey TAKES,
-			      size_t scriptpubkey_len,
-			      enum addrtype addrtype)
-{
-	struct wallet_address *waddr = tal(our_addresses, struct wallet_address);
-
-	waddr->index = index;
-	waddr->addrtype = addrtype;
-	waddr->swl.script = tal_dup_arr(waddr, u8, scriptpubkey, scriptpubkey_len, 0);
-	waddr->swl.len = scriptpubkey_len;
-	wallet_address_htable_add(our_addresses, waddr);
-}
-
-static void our_addresses_add_for_index(struct wallet *w, u32 i)
-{
-	struct pubkey pubkey;
-	enum addrtype addrtype;
-	const u8 *scriptpubkey;
-	bool legacy = (w->ld->bip86_base == NULL);
-
-	/* Choose derivation method based on wallet type */
-	if (w->ld->bip86_base) {
-		bip86_pubkey(w->ld, &pubkey, i);
-	} else {
-		bip32_pubkey(w->ld, &pubkey, i);
-	}
-
-	/* Determine which address types to generate */
-	if (!wallet_get_addrtype(w, i, &addrtype)) {
-		/* Unknown (prior to 24.11): add all possibilities */
-		//assert(legacy);
-		addrtype = ADDR_ALL;
-	}
-
-	/* Generate scripts based on address type */
-	if (addrtype == ADDR_P2SH_SEGWIT) {
-		/* This doesn't happen */
-		abort();
-	}
-
-	if (addrtype & ADDR_BECH32) {
-		scriptpubkey = scriptpubkey_p2wpkh(NULL, &pubkey);
-
-		/* Add P2SH-wrapped version for legacy compatibility */
-		if (addrtype == ADDR_ALL && legacy) {
-			const u8 *addr = scriptpubkey_p2sh(NULL, scriptpubkey);
-			our_addresses_add(w->our_addresses, i, take(addr),
-					  tal_bytelen(addr), ADDR_P2SH_SEGWIT);
-		}
-
-		/* Add native BECH32 */
-		our_addresses_add(w->our_addresses, i, take(scriptpubkey),
-				  tal_bytelen(scriptpubkey), ADDR_BECH32);
-	}
-
-	if (addrtype & ADDR_P2TR) {
-		scriptpubkey = scriptpubkey_p2tr(NULL, &pubkey);
-		our_addresses_add(w->our_addresses, i, take(scriptpubkey),
-				  tal_bytelen(scriptpubkey), ADDR_P2TR);
-	}
-}
-
-static void our_addresses_init(struct wallet *w)
-{
-	w->our_addresses_maxindex = 0;
-	w->our_addresses = new_htable(w, wallet_address_htable);
-
-	/* Prefill the address table up to keyscan_gap so rescans immediately
-	 * include scripts without needing prior address allocations. */
-	for (u32 i = 0; i <= w->keyscan_gap; i++) {
-		our_addresses_add_for_index(w, i);
-	}
-	w->our_addresses_maxindex = w->keyscan_gap;
-}
-
-
 struct wallet *wallet_new(struct lightningd *ld, struct timers *timers)
 {
 	struct wallet *wallet = tal(ld, struct wallet);
@@ -264,10 +151,6 @@ struct wallet *wallet_new(struct lightningd *ld, struct timers *timers)
 
 	trace_span_start("invoices_new", wallet);
 	wallet->invoices = invoices_new(wallet, wallet, timers);
-	trace_span_end(wallet);
-
-	trace_span_start("our_addresses_init", wallet);
-	our_addresses_init(wallet);
 	trace_span_end(wallet);
 
 	db_commit_transaction(wallet->db);
@@ -1064,41 +947,67 @@ bool wallet_add_onchaind_utxo(struct wallet *w,
 	return true;
 }
 
+/* Parse owner string "wallet/<type>/<keyindex>" into keyidx and addrtype */
+static bool parse_wallet_owner(const char *owner, u32 *keyidx,
+			       enum addrtype *addrtype)
+{
+	const char *slash, *type_start, *idx_start;
+	char *end;
+	unsigned long val;
+
+	if (!strstarts(owner, "wallet/"))
+		return false;
+
+	type_start = owner + strlen("wallet/");
+	slash = strchr(type_start, '/');
+	if (!slash)
+		return false;
+
+	idx_start = slash + 1;
+	val = strtoul(idx_start, &end, 10);
+	if (end == idx_start || *end != '\0')
+		return false;
+	*keyidx = (u32)val;
+
+	if (strstarts(type_start, "p2wpkh/")) {
+		if (addrtype)
+			*addrtype = ADDR_BECH32;
+	} else if (strstarts(type_start, "p2tr/")) {
+		if (addrtype)
+			*addrtype = ADDR_P2TR;
+	} else if (strstarts(type_start, "p2sh_p2wpkh/")) {
+		if (addrtype)
+			*addrtype = ADDR_P2SH_SEGWIT;
+	} else {
+		return false;
+	}
+
+	return true;
+}
+
 bool wallet_can_spend(struct wallet *w, const u8 *script, size_t script_len,
 		      u32 *index, enum addrtype *addrtype)
 {
-	u64 bip32_max_index, bip86_max_index;
-	const struct wallet_address *waddr;
-	struct script_with_len scriptwl = {script, script_len};
+	const char *owner;
 
-	/* Update hash table if we need to */
-	bip32_max_index = db_get_intvar(w->db, "bip32_max_index", 0);
-	bip86_max_index = db_get_intvar(w->db, "bip86_max_index", 0);
-
-	/* Scan both BIP32 and BIP86 addresses */
-	u64 max_index = (bip32_max_index > bip86_max_index) ? bip32_max_index : bip86_max_index;
-	while (w->our_addresses_maxindex < max_index + w->keyscan_gap)
-		our_addresses_add_for_index(w, ++w->our_addresses_maxindex);
-
-	waddr = wallet_address_htable_get(w->our_addresses, &scriptwl);
-	if (!waddr)
+	owner = watchman_lookup_scriptpubkey(w->ld, script, script_len);
+	if (!owner)
 		return false;
 
-	/* If we found a used key in the keyscan_gap we should
-	 * remember that. */
+	if (!parse_wallet_owner(owner, index, addrtype))
+		return false;
+
+	/* Bump max index if we found a key beyond current max */
 	if (w->ld->bip86_base) {
-		/* BIP86-based wallet: all addresses use BIP86 derivation */
-		if (waddr->index > bip86_max_index)
-			db_set_intvar(w->db, "bip86_max_index", waddr->index);
+		u64 bip86_max_index = db_get_intvar(w->db, "bip86_max_index", 0);
+		if (*index > bip86_max_index)
+			db_set_intvar(w->db, "bip86_max_index", *index);
 	} else {
-		/* Legacy wallet: all addresses use BIP32 derivation */
-		if (waddr->index > bip32_max_index)
-			db_set_intvar(w->db, "bip32_max_index", waddr->index);
+		u64 bip32_max_index = db_get_intvar(w->db, "bip32_max_index", 0);
+		if (*index > bip32_max_index)
+			db_set_intvar(w->db, "bip32_max_index", *index);
 	}
 
-	*index = waddr->index;
-	if (addrtype)
-		*addrtype = waddr->addrtype;
 	return true;
 }
 
@@ -3351,7 +3260,6 @@ type_ok:
 	if (utxo->utxotype != UTXO_P2SH_P2WPKH && !blockheight) {
 		const char *addrtype_str = wallet_addrtype_to_owner_prefix(addrtype);
 
-		/* our_addresses only stores ADDR_BECH32, ADDR_P2SH_SEGWIT, ADDR_P2TR */
 		assert(addrtype_str);
 		wallet_add_bwatch_scriptpubkey(w->ld, addrtype_str, keyindex,
 					      get_block_height(w->ld),

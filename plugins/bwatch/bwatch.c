@@ -394,6 +394,10 @@ static const struct plugin_command commands[] = {
 		"gettransaction",
 		json_bwatch_get_transaction,
 	},
+	{
+		"lookupwatch",
+		json_bwatch_lookup,
+	},
 };
 
 int main(int argc, char *argv[])

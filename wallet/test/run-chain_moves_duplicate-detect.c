@@ -397,6 +397,11 @@ void watchman_add_utxo(struct lightningd *ld UNNEEDED,
 /* Generated stub for get_block_height */
 u32 get_block_height(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "get_block_height called!\n"); abort(); }
+/* Generated stub for watchman_lookup_scriptpubkey */
+const char *watchman_lookup_scriptpubkey(struct lightningd *ld UNNEEDED,
+					 const u8 *script UNNEEDED,
+					 size_t script_len UNNEEDED)
+{ fprintf(stderr, "watchman_lookup_scriptpubkey called!\n"); abort(); }
 /* Generated stub for watchman_watch_scriptpubkey */
 void watchman_watch_scriptpubkey(struct lightningd *ld UNNEEDED,
 				 const char *owner UNNEEDED,

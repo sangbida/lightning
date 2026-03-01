@@ -313,6 +313,8 @@ struct lightningd {
 	/* Speedup gossip propagation, for testing. */
 	bool dev_fast_gossip;
 	bool dev_fast_gossip_prune;
+	/* Deprecated: --dev-bitcoind-poll value, ignored (bwatch drives updates) */
+	u32 dev_bitcoind_poll_ignored;
 	bool dev_throttle_gossip;
 	bool dev_suppress_gossip;
 

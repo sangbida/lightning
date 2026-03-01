@@ -129,6 +129,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->dev_allow_localhost = false;
 	ld->dev_fast_gossip = false;
 	ld->dev_fast_gossip_prune = false;
+	ld->dev_bitcoind_poll_ignored = 0;
 	ld->dev_throttle_gossip = false;
 	ld->dev_suppress_gossip = false;
 	ld->dev_fast_reconnect = false;
@@ -1417,9 +1418,9 @@ int main(int argc, char *argv[])
 	htlcs_resubmit(ld, unconnected_htlcs_in);
 	db_commit_transaction(ld->wallet->db);
 
-	/*~ Activate connect daemon.  Needs to be after the initialization of
-	 * chaintopology, otherwise peers may connect and ask for
-	 * uninitialized data. */
+	/*~ Activate connect daemon.  Needs to be after watchman and wallet
+	 * scriptpubkey watches are initialized, otherwise peers may connect
+	 * and ask for uninitialized data. */
 	connectd_activate(ld);
 
 	/*~ "onchaind" is a dumb daemon which tries to get our funds back: it

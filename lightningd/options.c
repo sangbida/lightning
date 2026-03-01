@@ -819,6 +819,11 @@ static void dev_register_opts(struct lightningd *ld)
 		     opt_set_bool,
 		     &ld->dev_fast_gossip_prune,
 		     "Make gossip pruning 120 seconds");
+	/* Deprecated: no-op since bwatch drives block/feerate updates now */
+	clnopt_witharg("--dev-bitcoind-poll", OPT_DEV|OPT_SHOWINT,
+		       opt_set_u32, opt_show_u32,
+		       &ld->dev_bitcoind_poll_ignored,
+		       "Deprecated: ignored (bwatch drives updates now)");
 	clnopt_witharg("--dev-force-privkey", OPT_DEV,
 		       opt_force_privkey, NULL, ld,
 		       "Force HSM to use this as node private key");

@@ -24,6 +24,8 @@
 #include <lightningd/notification.h>
 #include <lightningd/onchain_control.h>
 #include <lightningd/peer_control.h>
+#include <ccan/io/io.h>
+#include <lightningd/io_loop_with_timers.h>
 #include <lightningd/plugin.h>
 #include <lightningd/watchman.h>
 #include <wallet/wallet.h>
@@ -304,6 +306,55 @@ u32 get_block_height(struct lightningd *ld)
 	if (!wm)
 		return 0;
 	return wm->last_processed_height;
+}
+
+/* Context for sync lookupwatch RPC */
+struct lookupwatch_ctx {
+	struct lightningd *ld;
+	const char *owner;  /* result, tal(ld) */
+};
+
+static void lookupwatch_cb(const char *buf, const jsmntok_t *toks,
+			  const jsmntok_t *idtok UNUSED,
+			  struct lookupwatch_ctx *ctx)
+{
+	const jsmntok_t *result_tok = json_get_member(buf, toks, "result");
+	if (result_tok) {
+		bool found;
+		const jsmntok_t *found_tok = json_get_member(buf, result_tok, "found");
+		if (found_tok && json_to_bool(buf, found_tok, &found) && found) {
+			const jsmntok_t *owners_tok = json_get_member(buf, result_tok, "owners");
+			if (owners_tok && owners_tok->type == JSMN_ARRAY && owners_tok->size > 0) {
+				const jsmntok_t *owner_tok = owners_tok + 1;
+				const char *owner = json_strdup(tmpctx, buf, owner_tok);
+				if (owner && strstarts(owner, "wallet/"))
+					ctx->owner = tal_strdup(ctx->ld, owner);
+			}
+		}
+	}
+	io_break(ctx->ld);
+}
+
+const char *watchman_lookup_scriptpubkey(struct lightningd *ld,
+					 const u8 *script,
+					 size_t script_len)
+{
+	struct plugin *bwatch;
+	struct jsonrpc_request *req;
+	struct lookupwatch_ctx ctx = { .ld = ld, .owner = NULL };
+
+	bwatch = find_plugin_for_command(ld, "lookupwatch");
+	if (!bwatch || bwatch->plugin_state != INIT_COMPLETE)
+		return NULL;
+
+	req = jsonrpc_request_start(tmpctx, "lookupwatch", NULL,
+				   bwatch->log, NULL, lookupwatch_cb, &ctx);
+	json_add_hex(req->stream, "scriptpubkey", script, script_len);
+	jsonrpc_request_end(req);
+	plugin_request_send(bwatch, req);
+
+	io_loop_with_timers(ld);
+	return ctx.owner;
 }
 
 void watchman_watch_scriptpubkey(struct lightningd *ld,

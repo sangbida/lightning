@@ -526,6 +526,39 @@ struct command_result *json_bwatch_list(struct command *cmd,
 	return command_success(cmd, jout);
 }
 
+/* RPC command: lookupwatch — look up a scriptpubkey watch and return its owners */
+struct command_result *json_bwatch_lookup(struct command *cmd,
+					  const char *buffer,
+					  const jsmntok_t *params)
+{
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
+	u8 *scriptpubkey;
+	struct watch *w;
+	struct scriptpubkey spk;
+	struct json_out *jout;
+
+	if (!param(cmd, buffer, params,
+		   p_req("scriptpubkey", param_bin_from_hex, &scriptpubkey),
+		   NULL))
+		return command_param_failed();
+
+	spk.script = scriptpubkey;
+	spk.len = tal_bytelen(scriptpubkey);
+
+	w = scriptpubkey_watches_get(bwatch->scriptpubkey_watches, &spk);
+	jout = json_out_new(cmd);
+	json_out_start(jout, NULL, '{');
+	json_out_add(jout, "found", false, "%s", w ? "true" : "false");
+	if (w) {
+		json_out_start(jout, "owners", '[');
+		for (size_t i = 0; i < tal_count(w->owners); i++)
+			json_out_addstr(jout, NULL, w->owners[i]);
+		json_out_end(jout, ']');
+	}
+	json_out_end(jout, '}');
+	return command_success(cmd, jout);
+}
+
 /*
  * ============================================================================
  * WATCHMAN SYNCHRONIZATION

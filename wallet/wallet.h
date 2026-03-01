@@ -42,10 +42,6 @@ struct wallet {
 	struct invoices *invoices;
 	u64 max_channel_dbid;
 
-	/* Our issued wallet addresses.  We update on lookup. */
-	u32 our_addresses_maxindex;
-	struct wallet_address_htable *our_addresses;
-
 	/* How many keys should we look ahead at most? */
 	u64 keyscan_gap;
 };

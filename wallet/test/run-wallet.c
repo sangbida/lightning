@@ -27,6 +27,14 @@ static inline u32 test_get_block_height(struct lightningd *ld UNUSED)
 }
 #define get_block_height test_get_block_height
 
+static inline const char *test_watchman_lookup_scriptpubkey(struct lightningd *ld UNUSED,
+							   const u8 *script UNUSED,
+							   size_t script_len UNUSED)
+{
+	return NULL;
+}
+#define watchman_lookup_scriptpubkey test_watchman_lookup_scriptpubkey
+
 static inline void test_watchman_watch_scriptpubkey(struct lightningd *ld UNUSED,
 						    const char *owner UNUSED,
 						    const u8 *scriptpubkey UNUSED,
@@ -91,6 +99,7 @@ static inline void test_watchman_add_utxo(struct lightningd *ld UNUSED,
 #undef get_block_height
 #undef watchman_add
 #undef watchman_add_utxo
+#undef watchman_lookup_scriptpubkey
 
 /* Forward declarations for stubs (declarations were macro-hidden earlier) */
 u32 get_block_height(struct lightningd *ld);
