@@ -15,6 +15,7 @@ struct pending_op;
 struct watchman {
 	struct lightningd *ld;
 	u32 last_processed_height;
+	struct bitcoin_blkid last_processed_hash;
 	struct pending_op **pending_ops;
 
 	/* Feerate estimation state (updated per-block via block_processed) */
@@ -42,6 +43,10 @@ typedef void (*watch_found_fn)(struct lightningd *ld,
 			       size_t outnum,
 			       u32 blockheight,
 			       u32 txindex);
+
+typedef void (*watch_revert_fn)(struct lightningd *ld,
+				const char *suffix,
+				u32 blockheight);
 
 /**
  * watchman_new - Create and initialize a new watchman instance

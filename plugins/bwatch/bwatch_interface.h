@@ -12,6 +12,10 @@ void bwatch_send_watch_found(struct command *cmd,
 			     u32 txindex,
 			     u32 index);
 
+void bwatch_send_watch_revert(struct command *cmd,
+			      const char *owner,
+			      u32 blockheight);
+
 /* Send block_processed notification to watchman (fetches feerates first) */
 
 /* Send chaininfo (chain name, IBD status, sync) to watchman; timer callback */
@@ -19,6 +23,10 @@ struct command_result *bwatch_send_chaininfo(struct command *cmd, void *unused U
 
 /* Send block_processed to watchman; starts next poll from ack callback */
 struct command_result *bwatch_send_block_processed(struct command *cmd);
+
+/* Notify watchman that a block was rolled back; updates its persisted tip */
+void bwatch_send_revert_block_processed(struct command *cmd, u32 new_height,
+					const struct bitcoin_blkid *new_hash);
 
 /* Sync with watchman height on startup */
 struct command_result *bwatch_sync_with_watchman(struct command *cmd, void *unused);

@@ -61,6 +61,20 @@ void bwatch_send_watch_found(struct command *cmd,
 	send_outreq(req);
 }
 
+void bwatch_send_watch_revert(struct command *cmd,
+			      const char *owner,
+			      u32 blockheight)
+{
+	struct command *aux = aux_command(cmd);
+	struct out_req *req;
+
+	req = jsonrpc_request_start(aux, "watch_revert",
+				    watch_found_done, watch_found_done, NULL);
+	json_add_string(req->js, "owner", owner);
+	json_add_u32(req->js, "blockheight", blockheight);
+	send_outreq(req);
+}
+
 /*
  * ============================================================================
  * SENDING BLOCK_PROCESSED NOTIFICATION
@@ -126,7 +140,27 @@ struct command_result *bwatch_send_block_processed(struct command *cmd)
 	req = jsonrpc_request_start(cmd, "block_processed",
 				    block_processed_ack, block_processed_err, NULL);
 	json_add_u32(req->js, "blockheight", bwatch->current_height);
+	json_add_string(req->js, "blockhash",
+			fmt_bitcoin_blkid(tmpctx, &bwatch->current_blockhash));
 	return send_outreq(req);
+}
+
+/* Notify watchman that a block was rolled back so it can update and persist
+ * its tip. Fire-and-forget via aux_command — the poll timer doesn't depend
+ * on the ack. Crash safety: if we crash before the ack, watchman's stale
+ * height will be higher than bwatch's on restart, retriggering rollback. */
+void bwatch_send_revert_block_processed(struct command *cmd, u32 new_height,
+					const struct bitcoin_blkid *new_hash)
+{
+	struct command *aux = aux_command(cmd);
+	struct out_req *req;
+
+	req = jsonrpc_request_start(aux, "revert_block_processed",
+				    watch_found_done, watch_found_done, NULL);
+	json_add_u32(req->js, "blockheight", new_height);
+	json_add_string(req->js, "blockhash",
+			fmt_bitcoin_blkid(tmpctx, new_hash));
+	send_outreq(req);
 }
 
 /* --- chaininfo: send chain name, IBD status to watchman on init --- */

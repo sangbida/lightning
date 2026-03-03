@@ -101,6 +101,13 @@ void bwatch_del_watch(struct command *cmd,
 		      const struct short_channel_id *scid,
 		      const char *owner_id);
 
+/* Returns a tal array of owner strings for every watch that was pruned.
+ * The array is allocated under ctx. */
+const char **bwatch_prune_watches_added_at_or_after(const tal_t *ctx,
+						    struct command *cmd,
+						    struct bwatch *bwatch,
+						    u32 min_start_block);
+
 /* Utxoset (replaces wallet utxoset table) */
 void bwatch_utxoset_add(struct command *cmd,
 		       const struct bitcoin_outpoint *outpoint,

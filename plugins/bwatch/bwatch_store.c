@@ -746,3 +746,57 @@ void bwatch_del_watch(struct command *cmd,
 	plugin_log(cmd->plugin, LOG_BROKEN,
 		   "Attempted to remove watch for owner %s but it wasn't watching", owner_id);
 }
+
+const char **bwatch_prune_watches_added_at_or_after(const tal_t *ctx,
+						    struct command *cmd,
+						    struct bwatch *bwatch,
+						    u32 min_start_block)
+{
+	struct watch **prunable = tal_arr(tmpctx, struct watch *, 0);
+	const char **reverted_owners = tal_arr(ctx, const char *, 0);
+	struct watch *w;
+	struct scriptpubkey_watches_iter sit;
+	struct outpoint_watches_iter oit;
+	struct txid_watches_iter tit;
+	struct scid_watches_iter scit;
+
+	for (w = scriptpubkey_watches_first(bwatch->scriptpubkey_watches, &sit);
+	     w;
+	     w = scriptpubkey_watches_next(bwatch->scriptpubkey_watches, &sit)) {
+		if (w->start_block >= min_start_block)
+			tal_arr_expand(&prunable, w);
+	}
+
+	for (w = outpoint_watches_first(bwatch->outpoint_watches, &oit);
+	     w;
+	     w = outpoint_watches_next(bwatch->outpoint_watches, &oit)) {
+		if (w->start_block >= min_start_block)
+			tal_arr_expand(&prunable, w);
+	}
+
+	for (w = txid_watches_first(bwatch->txid_watches, &tit);
+	     w;
+	     w = txid_watches_next(bwatch->txid_watches, &tit)) {
+		if (w->start_block >= min_start_block)
+			tal_arr_expand(&prunable, w);
+	}
+
+	for (w = scid_watches_first(bwatch->scid_watches, &scit);
+	     w;
+	     w = scid_watches_next(bwatch->scid_watches, &scit)) {
+		if (w->start_block >= min_start_block)
+			tal_arr_expand(&prunable, w);
+	}
+
+	for (size_t i = 0; i < tal_count(prunable); i++) {
+		w = prunable[i];
+		for (size_t j = 0; j < tal_count(w->owners); j++)
+			tal_arr_expand(&reverted_owners,
+				       tal_strdup(ctx, w->owners[j]));
+		bwatch_delete_watch_from_datastore(cmd, w);
+		bwatch_remove_watch_from_hash(bwatch, w);
+		tal_free(w);
+	}
+
+	return reverted_owners;
+}

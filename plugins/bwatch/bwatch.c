@@ -112,6 +112,13 @@ void bwatch_remove_tip(struct command *cmd, struct bwatch *bwatch)
 		   bwatch->current_height,
 		   fmt_bitcoin_blkid(tmpctx, &bwatch->current_blockhash));
 
+	/* Prune watches added at the disconnected block and notify watchman
+	 * to revert any side-effects each owner triggered. */
+	const char **owners = bwatch_prune_watches_added_at_or_after(
+		tmpctx, cmd, bwatch, bwatch->current_height);
+	for (size_t i = 0; i < tal_count(owners); i++)
+		bwatch_send_watch_revert(cmd, owners[i], bwatch->current_height);
+
 	/* Delete block from datastore */
 	bwatch_delete_block_from_datastore(cmd, bwatch->current_height);
 
@@ -123,14 +130,20 @@ void bwatch_remove_tip(struct command *cmd, struct bwatch *bwatch)
 	size_t newcount = count - 1;
 	if (newcount > 0) {
 		struct block_record_wire *newtip = bwatch->block_history[newcount - 1];
+		assert(newtip->height == bwatch->current_height - 1);
 		bwatch->current_height = newtip->height;
 		bwatch->current_blockhash = newtip->hash;
-		assert(newtip->height == bwatch->current_height);
 	} else {
 		/* Back to genesis */
 		bwatch->current_height = 0;
 		memset(&bwatch->current_blockhash, 0, sizeof(bwatch->current_blockhash));
 	}
+
+	/* Tell watchman the tip rolled back so it persists the new height+hash.
+	 * If we crash before the ack, watchman's stale height > bwatch's height
+	 * on restart, which naturally retriggers the rollback via getwatchmanheight. */
+	bwatch_send_revert_block_processed(cmd, bwatch->current_height,
+					   &bwatch->current_blockhash);
 }
 
 /* Process or initialize from a block */
@@ -371,7 +384,7 @@ static const char *init(struct command *cmd,
 	/* Restore watches from datastore */
 	bwatch_load_watches_from_datastore(cmd, bwatch);
 
-	/* Defer watchman height sync and chaininfo to a timer so init can complete synchronously */
+	/* Defer watchman height sync to a timer so init can complete synchronously. */
 	global_timer(cmd->plugin, time_from_sec(0), bwatch_sync_with_watchman, NULL);
 
 	return NULL; /* Success */

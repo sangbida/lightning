@@ -1,6 +1,8 @@
 #include "config.h"
+#include <bitcoin/block.h>
 #include <bitcoin/tx.h>
 #include <ccan/array_size/array_size.h>
+#include <db/exec.h>
 #include <ccan/json_out/json_out.h>
 #include <ccan/str/str.h>
 #include <ccan/tal/str/str.h>
@@ -12,7 +14,6 @@
 #include <common/jsonrpc_errors.h>
 #include <common/jsonrpc_io.h>
 #include <common/timeout.h>
-#include <db/exec.h>
 #include <lightningd/bitcoind.h>
 #include <lightningd/broadcast.h>
 #include <lightningd/channel.h>
@@ -65,13 +66,17 @@ static const char **make_key(const tal_t *ctx, const char *op_id)
 	return key;
 }
 
+
 /* Persist a pending operation to the datastore for crash recovery */
 static void db_save(struct watchman *wm, const struct pending_op *op)
 {
 	const char **key = make_key(tmpctx, op->op_id);
 	u8 *data = tal_dup_arr(tmpctx, u8, (u8 *)op->json_params,
 			       strlen(op->json_params) + 1, 0);
-	wallet_datastore_create(wm->ld->wallet, key, data);
+	if (wallet_datastore_get(tmpctx, wm->ld->wallet, key, NULL))
+		wallet_datastore_update(wm->ld->wallet, key, data);
+	else
+		wallet_datastore_create(wm->ld->wallet, key, data);
 }
 
 /* Remove a pending operation from the datastore */
@@ -79,6 +84,27 @@ static void db_remove(struct watchman *wm, const char *op_id)
 {
 	const char **key = make_key(tmpctx, op_id);
 	wallet_datastore_remove(wm->ld->wallet, key);
+}
+
+static void save_tip(struct watchman *wm)
+{
+	struct db *db = wm->ld->wallet->db;
+	db_set_intvar(db, "last_watchman_block_height", wm->last_processed_height);
+	db_set_blobvar(db, "last_watchman_block_hash",
+		       (const u8 *)&wm->last_processed_hash,
+		       sizeof(wm->last_processed_hash));
+}
+
+static void load_tip(struct watchman *wm)
+{
+	struct db *db = wm->ld->wallet->db;
+	const u8 *blob;
+
+	wm->last_processed_height = db_get_intvar(db, "last_watchman_block_height", 0);
+
+	blob = db_get_blobvar(tmpctx, db, "last_watchman_block_hash");
+	if (blob && tal_bytelen(blob) == sizeof(struct bitcoin_blkid))
+		memcpy(&wm->last_processed_hash, blob, sizeof(wm->last_processed_hash));
 }
 
 /* Load all pending operations from datastore on startup */
@@ -110,22 +136,24 @@ static void load_pending_ops(struct watchman *wm)
 	}
 }
 
+static void watchman_on_plugin_ready(struct lightningd *ld, struct plugin *plugin);
+
 struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld)
 {
-	struct watchman *wm = tal(ctx, struct watchman);
+	struct watchman *wm = talz(ctx, struct watchman);
 
 	wm->ld = ld;
-	wm->last_processed_height = db_get_intvar(ld->wallet->db,
-						  "last_watchman_block_height", 0);
 	wm->pending_ops = tal_arr(wm, struct pending_op *, 0);
-	wm->feerate_floor = 0;
-	memset(wm->feerates, 0, sizeof(wm->feerates));
-	wm->smoothed_feerates = NULL;
 
 	load_pending_ops(wm);
+	/* Load persisted tip (height + hash) from the SQL vars table. */
+	load_tip(wm);
 
 	log_info(ld->log, "Watchman: height=%u, %zu pending ops",
 		 wm->last_processed_height, tal_count(wm->pending_ops));
+
+	/* Replay pending ops exactly when bwatch transitions to INIT_COMPLETE. */
+	ld->plugins->on_plugin_ready = watchman_on_plugin_ready;
 
 	return wm;
 }
@@ -183,7 +211,6 @@ static void send_to_bwatch(struct watchman *wm, const char *method,
 	if (bwatch->plugin_state != INIT_COMPLETE) {
 		log_debug(wm->ld->log, "bwatch plugin not ready (state %d), queuing %s %s",
 			  bwatch->plugin_state, method, op_id);
-		/* Operation is already queued, will be sent when plugin is ready */
 		return;
 	}
 
@@ -312,6 +339,19 @@ void watchman_replay_pending(struct lightningd *ld)
 		}
 		send_to_bwatch(wm, method, op->op_id, op->json_params);
 	}
+}
+
+/* Called by plugin machinery when any plugin hits INIT_COMPLETE.
+ * We use this to trigger pending-op replay the moment bwatch is truly ready. */
+static void watchman_on_plugin_ready(struct lightningd *ld, struct plugin *plugin)
+{
+	if (!ld->watchman)
+		return;
+	/* Check if this is bwatch by seeing if it owns the "addwatch" method. */
+	if (find_plugin_for_command(ld, "addwatch") != plugin)
+		return;
+	log_debug(ld->log, "bwatch reached INIT_COMPLETE, replaying pending ops");
+	watchman_replay_pending(ld);
 }
 
 u32 get_block_height(struct lightningd *ld)
@@ -583,28 +623,67 @@ void watchman_add_utxo(struct lightningd *ld,
 }
 
 /* Dispatch table - add new watch types here */
+static void wallet_utxo_spent_watch_revert(struct lightningd *ld UNUSED,
+					   const char *suffix UNUSED,
+					   u32 blockheight UNUSED) {}
+static void wallet_watch_p2wpkh_revert(struct lightningd *ld UNUSED,
+				       const char *suffix UNUSED,
+				       u32 blockheight UNUSED) {}
+static void wallet_watch_p2tr_revert(struct lightningd *ld UNUSED,
+				     const char *suffix UNUSED,
+				     u32 blockheight UNUSED) {}
+static void wallet_watch_p2sh_p2wpkh_revert(struct lightningd *ld UNUSED,
+					    const char *suffix UNUSED,
+					    u32 blockheight UNUSED) {}
+static void channel_funding_watch_revert(struct lightningd *ld UNUSED,
+					 const char *suffix UNUSED,
+					 u32 blockheight UNUSED) {}
+static void channel_funding_spent_watch_revert(struct lightningd *ld UNUSED,
+					       const char *suffix UNUSED,
+					       u32 blockheight UNUSED) {}
+static void channel_wrong_funding_spent_watch_revert(struct lightningd *ld UNUSED,
+						     const char *suffix UNUSED,
+						     u32 blockheight UNUSED) {}
+static void channel_rogue_inflight_watch_revert(struct lightningd *ld UNUSED,
+						const char *suffix UNUSED,
+						u32 blockheight UNUSED) {}
+static void onchaind_tx_watch_revert(struct lightningd *ld UNUSED,
+				     const char *suffix UNUSED,
+				     u32 blockheight UNUSED) {}
+static void onchaind_output_watch_revert(struct lightningd *ld UNUSED,
+					 const char *suffix UNUSED,
+					 u32 blockheight UNUSED) {}
+static void gossip_scid_watch_revert(struct lightningd *ld UNUSED,
+				     const char *suffix UNUSED,
+				     u32 blockheight UNUSED) {}
+
 static const struct watch_dispatch {
 	const char *prefix;
 	watch_found_fn handler;
+	watch_revert_fn revert;
 } watch_handlers[] = {
-	{ "wallet/utxo/",         wallet_utxo_spent_watch_found },
-	{ "wallet/p2wpkh/",       wallet_watch_p2wpkh },
-	{ "wallet/p2tr/",         wallet_watch_p2tr },
-	{ "wallet/p2sh_p2wpkh/",  wallet_watch_p2sh_p2wpkh },
+	/* wallet/utxo/<txid>:<outnum>: WATCH_OUTPOINT, fires when a wallet UTXO is spent */
+	{ "wallet/utxo/",         wallet_utxo_spent_watch_found, wallet_utxo_spent_watch_revert },
+	/* wallet/p2wpkh/<keyidx>: WATCH_SCRIPTPUBKEY, fires when a p2wpkh wallet address receives funds */
+	{ "wallet/p2wpkh/",       wallet_watch_p2wpkh, wallet_watch_p2wpkh_revert },
+	/* wallet/p2tr/<keyidx>: WATCH_SCRIPTPUBKEY, fires when a p2tr wallet address receives funds */
+	{ "wallet/p2tr/",         wallet_watch_p2tr, wallet_watch_p2tr_revert },
+	/* wallet/p2sh_p2wpkh/<keyidx>: WATCH_SCRIPTPUBKEY, fires when a p2sh-wrapped p2wpkh address receives funds */
+	{ "wallet/p2sh_p2wpkh/",  wallet_watch_p2sh_p2wpkh, wallet_watch_p2sh_p2wpkh_revert },
 	/* channel/funding/<dbid>: WATCH_SCRIPTPUBKEY, fires when funding tx confirmed */
-	{ "channel/funding/",               channel_funding_watch_found },
+	{ "channel/funding/",               channel_funding_watch_found, channel_funding_watch_revert },
 	/* channel/funding_spent/<dbid>: WATCH_OUTPOINT, fires when funding outpoint spent */
-	{ "channel/funding_spent/",         channel_funding_spent_watch_found },
+	{ "channel/funding_spent/",         channel_funding_spent_watch_found, channel_funding_spent_watch_revert },
 	/* channel/wrong_funding_spent/<dbid>: WATCH_OUTPOINT, fires when shutdown_wrong_funding outpoint spent */
-	{ "channel/wrong_funding_spent/",   channel_wrong_funding_spent_watch_found },
+	{ "channel/wrong_funding_spent/",   channel_wrong_funding_spent_watch_found, channel_wrong_funding_spent_watch_revert },
 	/* channel/rogue_inflight/<dbid>: WATCH_TXID, fires when a non-primary inflight tx confirms */
-	{ "channel/rogue_inflight/",        channel_rogue_inflight_watch_found },
+	{ "channel/rogue_inflight/",        channel_rogue_inflight_watch_found, channel_rogue_inflight_watch_revert },
 	/* onchaind/txid/<dbid>: WATCH_TXID, fires when any onchaind-tracked tx confirms */
-	{ "onchaind/txid/",                   onchaind_tx_watch_found },
+	{ "onchaind/txid/",                   onchaind_tx_watch_found, onchaind_tx_watch_revert },
 	/* onchaind/outpoint/<dbid>: WATCH_OUTPOINT, fires when any onchaind output is spent */
-	{ "onchaind/outpoint/",               onchaind_output_watch_found },
+	{ "onchaind/outpoint/",               onchaind_output_watch_found, onchaind_output_watch_revert },
 	/* gossip/<scid>: WATCH_SCID, fires when a channel announcement UTXO is confirmed */
-	{ "gossip/",                          gossip_scid_watch_found },
+	{ "gossip/",                          gossip_scid_watch_found, gossip_scid_watch_revert },
 };
 
 /**
@@ -633,6 +712,21 @@ static void dispatch_watch_found(struct lightningd *ld,
 	log_debug(ld->log, "No handler for watch owner: %s", owner);
 }
 
+static void dispatch_watch_revert(struct lightningd *ld,
+				  const char *owner,
+				  u32 blockheight)
+{
+	for (size_t i = 0; i < ARRAY_SIZE(watch_handlers); i++) {
+		if (strstarts(owner, watch_handlers[i].prefix)) {
+			const char *suffix = owner + strlen(watch_handlers[i].prefix);
+			watch_handlers[i].revert(ld, suffix, blockheight);
+			return;
+		}
+	}
+
+	log_debug(ld->log, "No revert handler for watch owner: %s", owner);
+}
+
 static struct command_result *param_bitcoin_tx(struct command *cmd,
 					       const char *name,
 					       const char *buffer,
@@ -643,6 +737,19 @@ static struct command_result *param_bitcoin_tx(struct command *cmd,
 	if (!*tx)
 		return command_fail_badparam(cmd, name, buffer, tok,
 					     "Expected a hex-encoded transaction");
+	return NULL;
+}
+
+static struct command_result *param_bitcoin_blkid_cmd(struct command *cmd,
+						      const char *name,
+						      const char *buffer,
+						      const jsmntok_t *tok,
+						      struct bitcoin_blkid **blkid)
+{
+	*blkid = tal(cmd, struct bitcoin_blkid);
+	if (!json_to_bitcoin_blkid(buffer, tok, *blkid))
+		return command_fail_badparam(cmd, name, buffer, tok,
+					     "Expected a blockhash");
 	return NULL;
 }
 
@@ -690,34 +797,65 @@ static struct command_result *json_watch_found(struct command *cmd,
 	return command_success(cmd, response);
 }
 
-static void apply_block_feerates(struct lightningd *ld,
-				 const char *buffer,
-				 u32 feerate_floor,
-				 const jsmntok_t *feerates_tok)
+static struct command_result *json_watch_revert(struct command *cmd,
+						const char *buffer,
+						const jsmntok_t *obj UNNEEDED,
+						const jsmntok_t *params)
 {
-	struct feerate_est *rates;
-	const jsmntok_t *t;
-	size_t i;
+	const char *owner;
+	u32 *blockheight;
 
-	rates = tal_arr(tmpctx, struct feerate_est, feerates_tok->size);
-	json_for_each_arr(i, t, feerates_tok) {
-		u32 blocks, feerate;
-		const char *err;
+	if (!param_check(cmd, buffer, params,
+			 p_req("owner", param_string, &owner),
+			 p_req("blockheight", param_number, &blockheight),
+			 NULL))
+		return command_param_failed();
 
-		err = json_scan(tmpctx, buffer, t,
-				"{blocks:%,feerate:%}",
-				JSON_SCAN(json_to_number, &blocks),
-				JSON_SCAN(json_to_number, &feerate));
-		if (err) {
-			log_unusual(ld->log,
-				    "block_processed: bad feerate entry: %s",
-				    err);
-			return;
-		}
-		rates[i].blockcount = blocks;
-		rates[i].rate = feerate;
-	}
-	update_feerates(ld, feerate_floor, take(rates));
+	if (command_check_only(cmd))
+		return command_check_done(cmd);
+
+	dispatch_watch_revert(cmd->ld, owner, *blockheight);
+	struct json_stream *response = json_stream_success(cmd);
+	json_add_u32(response, "blockheight", *blockheight);
+	return command_success(cmd, response);
+}
+
+/**
+ * json_revert_block_processed - RPC handler called by bwatch when it rolls
+ * back a block during a reorg. Updates and persists watchman's tip so that
+ * on restart the height/hash reflect the rolled-back state rather than the
+ * disconnected block.
+ */
+static struct command_result *json_revert_block_processed(struct command *cmd,
+							  const char *buffer,
+							  const jsmntok_t *obj UNNEEDED,
+							  const jsmntok_t *params)
+{
+	struct watchman *wm = cmd->ld->watchman;
+	u32 *blockheight;
+	struct bitcoin_blkid *blockhash;
+
+	if (!param_check(cmd, buffer, params,
+			 p_req("blockheight", param_number, &blockheight),
+			 p_req("blockhash", param_bitcoin_blkid_cmd, &blockhash),
+			 NULL))
+		return command_param_failed();
+
+	if (command_check_only(cmd))
+		return command_check_done(cmd);
+
+	if (!wm)
+		return command_fail(cmd, LIGHTNINGD, "Watchman not initialized");
+
+	log_debug(wm->ld->log, "revert_block_processed: %u -> %u",
+		  wm->last_processed_height, *blockheight);
+	wm->last_processed_height = *blockheight;
+	wm->last_processed_hash = *blockhash;
+	save_tip(wm);
+
+	struct json_stream *response = json_stream_success(cmd);
+	json_add_u32(response, "blockheight", *blockheight);
+	return command_success(cmd, response);
 }
 
 /**
@@ -734,13 +872,11 @@ static struct command_result *json_block_processed(struct command *cmd,
 {
 	struct watchman *wm = cmd->ld->watchman;
 	u32 *blockheight;
-	u32 *feerate_floor;
-	const jsmntok_t *feerates_tok;
+	struct bitcoin_blkid *blockhash;
 
 	if (!param_check(cmd, buffer, params,
 			 p_req("blockheight", param_number, &blockheight),
-			 p_opt("feerate_floor", param_number, &feerate_floor),
-			 p_opt("feerates", param_array, &feerates_tok),
+			 p_req("blockhash", param_bitcoin_blkid_cmd, &blockhash),
 			 NULL))
 		return command_param_failed();
 
@@ -754,12 +890,9 @@ static struct command_result *json_block_processed(struct command *cmd,
 		log_debug(wm->ld->log, "block_processed: %u -> %u",
 			  wm->last_processed_height, *blockheight);
 		wm->last_processed_height = *blockheight;
-		db_set_intvar(wm->ld->wallet->db, "last_watchman_block_height",
-			      *blockheight);
+		wm->last_processed_hash = *blockhash;
+		save_tip(wm);
 	}
-
-	if (feerate_floor && feerates_tok)
-		apply_block_feerates(wm->ld, buffer, *feerate_floor, feerates_tok);
 
 	channel_block_processed(wm->ld, *blockheight);
 	notify_new_block(wm->ld);
@@ -767,6 +900,9 @@ static struct command_result *json_block_processed(struct command *cmd,
 
 	struct json_stream *response = json_stream_success(cmd);
 	json_add_u32(response, "blockheight", *blockheight);
+	if (wm->last_processed_height > 0)
+		json_add_string(response, "blockhash",
+				fmt_bitcoin_blkid(response, &wm->last_processed_hash));
 	return command_success(cmd, response);
 }
 
@@ -793,12 +929,11 @@ static struct command_result *json_getwatchmanheight(struct command *cmd,
 	height = wm ? wm->last_processed_height : 0;
 	log_debug(cmd->ld->log, "getwatchmanheight: returning height=%u (wm=%s)",
 		  height, wm ? "ok" : "NULL");
-	/* Replay pending watch ops now — we're sending height to bwatch, so bwatch
-	 * is ready to receive addwatch/delwatch. Ops queued during startup get sent. */
-	if (wm)
-		watchman_replay_pending(cmd->ld);
 	response = json_stream_success(cmd);
 	json_add_u32(response, "height", height);
+	if (wm && wm->last_processed_height > 0)
+		json_add_string(response, "blockhash",
+				fmt_bitcoin_blkid(response, &wm->last_processed_hash));
 	return command_success(cmd, response);
 }
 
@@ -808,11 +943,23 @@ static const struct json_command watch_found_command = {
 };
 AUTODATA(json_command, &watch_found_command);
 
+static const struct json_command watch_revert_command = {
+	"watch_revert",
+	json_watch_revert,
+};
+AUTODATA(json_command, &watch_revert_command);
+
 static const struct json_command block_processed_command = {
 	"block_processed",
 	json_block_processed,
 };
 AUTODATA(json_command, &block_processed_command);
+
+static const struct json_command revert_block_processed_command = {
+	"revert_block_processed",
+	json_revert_block_processed,
+};
+AUTODATA(json_command, &revert_block_processed_command);
 
 static const struct json_command getwatchmanheight_command = {
 	"getwatchmanheight",

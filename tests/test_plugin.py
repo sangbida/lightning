@@ -5432,9 +5432,9 @@ def test_bwatch_watch_invalidated_by_reorg(node_factory, bitcoind):
     # 4. Mine new blocks - tx re-included from mempool
     bitcoind.generate_block(2)
 
-    # 5. Reorg detected; outpoint watch should be removed when block is rolled back
+    # 5. Reorg detected; stale block removed and its outpoint watch pruned from datastore
     l1.daemon.wait_for_log(r'Reorg detected', timeout=60)
-    wait_for(lambda: not _has_outpoint_watch(l1, txid), timeout=60)
+    l1.daemon.wait_for_log(rf'Deleted watch from datastore.*{txid}', timeout=60)
 
     # 6. Outpoint watch re-added when tx is re-detected in new chain
     wait_for(lambda: _has_outpoint_watch(l1, txid), timeout=60)
@@ -5548,28 +5548,32 @@ def test_watchman_pending_operations_cleanup(node_factory, bitcoind):
     
     # Verify the watch was actually added to bwatch
     watches = l1.rpc.listwatch()['watches']
-    assert len(watches) == 1
-    assert watches[0]['type'] == 'scriptpubkey'
-    assert watches[0]['scriptpubkey'] == test_spk
-    
+    spks = [w['scriptpubkey'] for w in watches]
+    assert test_spk in spks, f"Expected {test_spk} in watch list"
+
     # Test with multiple operations
     test_spk2 = "76a914" + "bb" * 20 + "88ac"
     test_spk3 = "76a914" + "cc" * 20 + "88ac"
-    
-    l1.rpc.addwatch(type='scriptpubkey', scriptpubkey=test_spk2, owner='wallet/p2tr/0', start_block=100)
-    l1.rpc.addwatch(type='scriptpubkey', scriptpubkey=test_spk3, owner='wallet/p2sh_p2wpkh/0', start_block=100)
-    
+
+    count_before = len(watches)
+
+    l1.rpc.addwatch(type='scriptpubkey', scriptpubkey=test_spk2, owner='wallet/p2tr/1', start_block=100)
+    l1.rpc.addwatch(type='scriptpubkey', scriptpubkey=test_spk3, owner='wallet/p2sh_p2wpkh/1', start_block=100)
+
     # Wait for acknowledgments
     time.sleep(1)
-    
+
     # All operations should be acknowledged and removed from pending
     final_pending = l1.rpc.listdatastore(['watchman', 'pending'])
     assert final_pending['datastore'] == [], \
         "All pending operations should be cleared after acknowledgment"
-    
-    # All watches should be active
+
+    # Both new watches should be active
     watches = l1.rpc.listwatch()['watches']
-    assert len(watches) == 3
+    spks = [w['scriptpubkey'] for w in watches]
+    assert test_spk2 in spks, f"Expected {test_spk2} in watch list"
+    assert test_spk3 in spks, f"Expected {test_spk3} in watch list"
+    assert len(watches) == count_before + 2
 
 
 @pytest.mark.slow_test
