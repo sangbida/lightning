@@ -409,13 +409,6 @@ struct wallet_transaction {
 struct wallet *wallet_new(struct lightningd *ld, struct timers *timers);
 
 /**
- * wallet_confirm_tx - Confirm a tx which contains a UTXO.
- */
-void wallet_confirm_tx(struct wallet *w,
-		       const struct bitcoin_txid *txid,
-		       const u32 confirmation_height);
-
-/**
  * wallet_update_output_status - Perform an output state transition
  *
  * Change the current status of an output we are tracking in the
@@ -448,15 +441,6 @@ struct utxo **wallet_get_all_utxos(const tal_t *ctx, struct wallet *w);
  */
 struct utxo **wallet_get_unspent_utxos(const tal_t *ctx, struct wallet *w);
 
-
-/**
- * wallet_get_unconfirmed_closeinfo_utxos - Retrieve any unconfirmed utxos w/ closeinfo
- *
- * Returns a `tal_arr` of `utxo` structs. Double indirection in order
- * to be able to steal individual elements onto something else.
- */
-struct utxo **wallet_get_unconfirmed_closeinfo_utxos(const tal_t *ctx,
-						     struct wallet *w);
 
 /**
  * wallet_find_utxo - Select an available UTXO (does not reserve it!).
@@ -497,25 +481,6 @@ bool wallet_has_funds(struct wallet *wallet,
 		      const struct utxo **excludes,
 		      u32 current_blockheight,
 		      struct amount_sat *needed);
-
-/**
- * wallet_add_onchaind_utxo - Add a UTXO with spending info from onchaind.
- *
- * Usually we add UTXOs by looking at transactions, but onchaind tells
- * us about other UTXOs we can spend with some extra metadata.
- *
- * Returns false if we already have it in db (that's fine).
- */
-bool wallet_add_onchaind_utxo(struct wallet *w,
-			      const struct bitcoin_outpoint *outpoint,
-			      const u8 *scriptpubkey,
-			      u32 blockheight,
-			      struct amount_sat amount,
-			      const struct channel *chan,
-			      /* NULL if option_static_remotekey */
-			      const struct pubkey *commitment_point,
-			      /* option_will_fund makes the csv_lock variable */
-			      u32 csv_lock);
 
 /**
  * wallet_reserve_utxo - set a reservation on a UTXO.

@@ -20,7 +20,6 @@ void migrate_pr2342_feerate_per_channel(struct lightningd *ld, struct db *db);
 void migrate_our_funding(struct lightningd *ld, struct db *db);
 void migrate_last_tx_to_psbt(struct lightningd *ld, struct db *db);
 void migrate_inflight_last_tx_to_psbt(struct lightningd *ld, struct db *db);
-void fillin_missing_scriptpubkeys(struct lightningd *ld, struct db *db);
 void fillin_missing_channel_id(struct lightningd *ld, struct db *db);
 void fillin_missing_local_basepoints(struct lightningd *ld,
 				     struct db *db);

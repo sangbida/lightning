@@ -5017,57 +5017,60 @@ def test_bwatch_scriptpubkey_watch_notifies_lightningd(node_factory, bitcoind):
     bitcoind.generate_block(1)
 
     # Wait for bwatch to process the block and send watch_found notification
-    l1.daemon.wait_for_log(r'watch_found: scriptpubkey at block', timeout=60)
+    l1.daemon.wait_for_log(r'watch_found at block', timeout=60)
 
 
-@pytest.mark.skip(reason="SC TODO: Add appropriate handler for txid watches (e.g., channel/onchaind handler)")
+@pytest.mark.openchannel('v2')
 def test_bwatch_txid_watch_notifies_lightningd(node_factory, bitcoind):
     """Test that a matching txid triggers watch_found to lightningd"""
-    l1 = node_factory.get_node()
+    l1, l2 = node_factory.line_graph(
+        2, fundamount=1_000_000, wait_for_announce=True,
+        opts=[{'experimental-splicing': None}, {}]
+    )
+    l1.daemon.wait_for_log(r'No block change')
 
-    # Wait for bwatch to sync
-    l1.daemon.wait_for_log(r'First poll: init at block')
+    # Start a splice to create an inflight tx; channel/rogue_inflight/<dbid>
+    # is the real handler. The channel already registers the watch, so addwatch
+    # may report "already watching"; either way the watch exists.
+    l1.rpc.splice('*:? -> 50000', force_feerate=True)
 
-    # Get an address to receive funds
-    addr = l1.rpc.newaddr('bech32')['bech32']
+    ch = only_one(l1.rpc.listpeerchannels(l2.info['id'])['channels'])
+    assert 'inflight' in ch
+    txid = only_one(ch['inflight'])['funding_txid']
 
-    # Create a transaction
-    txid = bitcoind.rpc.sendtoaddress(addr, 0.01)
+    l1.rpc.addwatch(type='txid', txid=txid, owner='channel/rogue_inflight/1', start_block=100)
 
-    # Add a watch for this specific txid BEFORE mining (use wallet owner)
-    l1.rpc.addwatch(type='txid', txid=txid, owner='wallet/p2wpkh/0', start_block=100)
-
-    # Mine the block containing the transaction
-    bitcoind.generate_block(1)
-
-    # bwatch sends watch_found to lightningd, which logs the match
-    l1.daemon.wait_for_log(r'watch_found: txid at block')
+    bitcoind.generate_block(6, wait_for_mempool=1)
+    l1.daemon.wait_for_log(r'watch_found at block')
 
 
-@pytest.mark.skip(reason="SC TODO: Add appropriate handler for outpoint watches (e.g., channel/onchaind handler)")
 def test_bwatch_outpoint_watch_notifies_lightningd(node_factory, bitcoind):
     """Test that spending a watched outpoint triggers watch_found to lightningd"""
-    l1 = node_factory.get_node()
-
-    # Fund l1 so it has UTXOs
+    l1, l2 = node_factory.get_nodes(2)
     l1.fundwallet(10_000_000)
+    l2.fundwallet(10_000_000)
 
-    # Get the UTXOs
-    utxos = l1.rpc.listfunds()['outputs']
-    assert len(utxos) > 0
+    l1.connect(l2)
+    l1.fundchannel(l2, 1_000_000)
+    l1.daemon.wait_for_log(r'First poll: init at block')
+    l1.daemon.wait_for_log(r'No block change')
+    l2.daemon.wait_for_log(r'No block change')
 
-    # Watch one of the outpoints
-    utxo = utxos[0]
-    outpoint = f"{utxo['txid']}:{utxo['output']}"
-    l1.rpc.addwatch(type='outpoint', outpoint=outpoint, owner='wallet/p2wpkh/0', start_block=100)
+    # Get the channel's funding outpoint (first channel has dbid 1)
+    channels = l1.rpc.listpeerchannels(l2.info['id'])['channels']
+    ch = only_one([c for c in channels if c['state'] == 'CHANNELD_NORMAL'])
+    outpoint = f"{ch['funding_txid']}:{ch['funding_outnum']}"
 
-    # Spend the UTXO by sending somewhere
-    addr = bitcoind.rpc.getnewaddress()
-    l1.rpc.withdraw(addr, 1_000_000)
+    # channel/funding_spent/<dbid> is the real handler — the channel already
+    # registered it, so addwatch may report "already watching"; either way
+    # the watch exists and will fire when the funding is spent.
+    l1.rpc.addwatch(type='outpoint', outpoint=outpoint, owner='channel/funding_spent/1', start_block=100)
+
+    # Force close spends the funding outpoint
+    l1.rpc.close(l2.info['id'])
     bitcoind.generate_block(1)
 
-    # bwatch sends watch_found to lightningd, which logs the match
-    l1.daemon.wait_for_log(r'watch_found: outpoint at block')
+    l1.daemon.wait_for_log(r'watch_found at block')
 
 
 @pytest.mark.slow_test
@@ -5102,7 +5105,7 @@ def test_bwatch_rescan_notifies_lightningd(node_factory, bitcoind):
     l1.daemon.wait_for_log(r'Starting rescan')
 
     # Rescan should find the match and notify lightningd
-    l1.daemon.wait_for_log(r'watch_found: scriptpubkey at block', timeout=60)
+    l1.daemon.wait_for_log(r'watch_found at block', timeout=60)
 
 
 def test_bwatch_watches_persist_across_restart(node_factory, bitcoind):
@@ -5361,12 +5364,7 @@ def test_bwatch_watch_triggered_on_reorg_chain(node_factory, bitcoind):
 
     # Get an address to watch
     addr = l1.rpc.newaddr('bech32')['bech32']
-    addr_info = bitcoind.rpc.getaddressinfo(addr)
-    scriptpubkey = addr_info['scriptPubKey']
-
-    # Add the watch - use wallet owner since this test checks for watch_found notifications
-    l1.rpc.addwatch(type='scriptpubkey', scriptpubkey=scriptpubkey,
-                    owner='wallet/p2wpkh/0', start_block=100)
+    # Use wallet's own watch registration for this address.
 
     # Mine some blocks (without our tx)
     bitcoind.generate_block(3)
@@ -5386,7 +5384,16 @@ def test_bwatch_watch_triggered_on_reorg_chain(node_factory, bitcoind):
     bitcoind.generate_block(3)
 
     # The watch should be triggered for the tx in the new chain
-    l1.daemon.wait_for_log(r'watch_found: scriptpubkey at block', timeout=60)
+    l1.daemon.wait_for_log(r'watch_found at block', timeout=60)
+
+
+def _has_outpoint_watch(l1, txid):
+    """Check if an outpoint watch exists for the given txid."""
+    watches = l1.rpc.listwatch()['watches']
+    return any(
+        any(owner.startswith(f"wallet/utxo/{txid}:") for owner in w.get('owners', []))
+        for w in watches if w['type'] == 'outpoint'
+    )
 
 
 @pytest.mark.slow_test
@@ -5400,13 +5407,6 @@ def test_bwatch_watch_invalidated_by_reorg(node_factory, bitcoind):
 
     # Get an address to watch
     addr = l1.rpc.newaddr('bech32')['bech32']
-    addr_info = bitcoind.rpc.getaddressinfo(addr)
-    scriptpubkey = addr_info['scriptPubKey']
-
-    # Add the watch - use wallet owner since this test checks for watch_found notifications
-    l1.rpc.addwatch(type='scriptpubkey', scriptpubkey=scriptpubkey,
-                    owner='wallet/p2wpkh/0', start_block=100)
-
     # Mine a block
     bitcoind.generate_block(1)
     expected_height = bitcoind.rpc.getblockcount()
@@ -5416,23 +5416,28 @@ def test_bwatch_watch_invalidated_by_reorg(node_factory, bitcoind):
     height = bitcoind.rpc.getblockcount()
 
     # Send tx and mine it
-    bitcoind.rpc.sendtoaddress(addr, 0.01)
+    txid = bitcoind.rpc.sendtoaddress(addr, 0.01)
     bitcoind.generate_block(1)
 
-    # Should see the watch triggered
-    l1.daemon.wait_for_log(r'watch_found: scriptpubkey at block', timeout=60)
+    # 1. Watch triggered for tx in first block
+    l1.daemon.wait_for_log(r'watch_found at block', timeout=60)
 
-    # Now cause a reorg that removes that block but keeps the tx in mempool
-    # (tx goes back to mempool when block is invalidated)
+    # 2. Scriptpubkey watch creates outpoint watch for the received UTXO
+    wait_for(lambda: _has_outpoint_watch(l1, txid), timeout=60)
+
+    # 3. Reorg: invalidate block (tx goes back to mempool)
     reorg_hash = bitcoind.rpc.getblockhash(height + 1)
     bitcoind.rpc.invalidateblock(reorg_hash)
 
-    # Mine new blocks - tx should be re-included from mempool
+    # 4. Mine new blocks - tx re-included from mempool
     bitcoind.generate_block(2)
 
-    # The watch should trigger again for the tx in the new chain
-    # (bwatch processes all blocks after the reorg point)
+    # 5. Reorg detected; outpoint watch should be removed when block is rolled back
     l1.daemon.wait_for_log(r'Reorg detected', timeout=60)
+    wait_for(lambda: not _has_outpoint_watch(l1, txid), timeout=60)
+
+    # 6. Outpoint watch re-added when tx is re-detected in new chain
+    wait_for(lambda: _has_outpoint_watch(l1, txid), timeout=60)
 
 
 @pytest.mark.slow_test

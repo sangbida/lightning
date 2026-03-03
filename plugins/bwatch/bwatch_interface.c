@@ -17,14 +17,16 @@
  * ============================================================================
  */
 
-/* Callback for watch_found RPC - we don't care about the response */
-static struct command_result *watch_found_done(struct command *cmd UNUSED,
+/* Callback for watch_found RPC.
+ * watch_found notifications are sent on an aux command so they cannot
+ * interfere with the poll command lifetime. */
+static struct command_result *watch_found_done(struct command *cmd,
 					       const char *method UNUSED,
 					       const char *buf UNUSED,
 					       const jsmntok_t *result UNUSED,
 					       void *arg UNUSED)
 {
-	return NULL;
+	return aux_command_done(cmd);
 }
 
 /* Send watch_found notification to lightningd
@@ -39,9 +41,10 @@ void bwatch_send_watch_found(struct command *cmd,
 			     u32 txindex,
 			     u32 index)
 {
+	struct command *aux = aux_command(cmd);
 	struct out_req *req;
 
-	req = jsonrpc_request_start(cmd, "watch_found",
+	req = jsonrpc_request_start(aux, "watch_found",
 				    watch_found_done, watch_found_done, NULL);
 	json_add_tx(req->js, "tx", tx);
 	json_add_u32(req->js, "blockheight", blockheight);
@@ -64,17 +67,18 @@ void bwatch_send_watch_found(struct command *cmd,
  * ============================================================================
  */
 
-/* Callback for block_processed acknowledgement from watchman */
+/* Callback for block_processed acknowledgement from watchman.
+ * Starts the next poll now that watchman's height is confirmed updated. */
 static struct command_result *block_processed_ack(struct command *cmd,
-						  const char *method UNUSED,
-						  const char *buf,
-						  const jsmntok_t *result,
-						  void *unused UNUSED)
+					  const char *method UNUSED,
+					  const char *buf,
+					  const jsmntok_t *result,
+					  void *unused UNUSED)
 {
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	u32 acked_height;
 	const char *err;
 
-	/* Parse the acknowledged height */
 	err = json_scan(tmpctx, buf, result,
 			"{blockheight:%}",
 			JSON_SCAN(json_to_number, &acked_height));
@@ -85,85 +89,44 @@ static struct command_result *block_processed_ack(struct command *cmd,
 
 	plugin_log(cmd->plugin, LOG_DBG,
 		   "Received block_processed ack for height %u", acked_height);
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+
+	/* Watchman height is now confirmed updated — safe to poll for next block */
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0),
+					  bwatch_poll_chain, NULL);
+	return timer_complete(cmd);
 }
 
-/* Non-fatal error handler for block_processed — watchman may not be ready */
+/* Non-fatal error: watchman may not be ready; still reschedule poll */
 static struct command_result *block_processed_err(struct command *cmd,
-						  const char *method UNUSED,
-						  const char *buf,
-						  const jsmntok_t *result,
-						  void *unused UNUSED)
+					  const char *method UNUSED,
+					  const char *buf,
+					  const jsmntok_t *result,
+					  void *unused UNUSED)
 {
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
+
 	plugin_log(cmd->plugin, LOG_DBG,
 		   "block_processed RPC failed (watchman not ready?): %.*s",
 		   json_tok_full_len(result), json_tok_full(buf, result));
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0),
+					  bwatch_poll_chain, NULL);
+	return timer_complete(cmd);
 }
 
-struct block_processed_info {
-	struct command *cmd;
-	u32 blockheight;
-};
-
-static struct command_result *estimatefees_for_block_done(struct command *cmd,
-							 const char *method,
-							 const char *buf,
-							 const jsmntok_t *result,
-							 struct block_processed_info *info)
+/* Send block_processed to watchman with just the blockheight.
+ * Fee estimates are now polled independently by lightningd every 30s.
+ * The next poll is started from block_processed_ack, ensuring watchman's
+ * height is updated before we log "No block change". */
+struct command_result *bwatch_send_block_processed(struct command *cmd)
 {
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	struct out_req *req;
-	const jsmntok_t *feerates_tok, *floor_tok;
 
-	req = jsonrpc_request_start(info->cmd, "block_processed",
+	req = jsonrpc_request_start(cmd, "block_processed",
 				    block_processed_ack, block_processed_err, NULL);
-	json_add_u32(req->js, "blockheight", info->blockheight);
-
-	/* Forward feerate data if available */
-	floor_tok = json_get_member(buf, result, "feerate_floor");
-	feerates_tok = json_get_member(buf, result, "feerates");
-	if (floor_tok && feerates_tok) {
-		u32 floor_val;
-		json_to_number(buf, floor_tok, &floor_val);
-		json_add_u32(req->js, "feerate_floor", floor_val);
-		json_add_tok(req->js, "feerates", feerates_tok, buf);
-	}
-
-	send_outreq(req);
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
-}
-
-static struct command_result *estimatefees_for_block_failed(struct command *cmd,
-							   const char *method UNUSED,
-							   const char *buf UNUSED,
-							   const jsmntok_t *result UNUSED,
-							   struct block_processed_info *info)
-{
-	struct out_req *req;
-
-	/* estimatefees failed — send block_processed without feerates */
-	plugin_log(cmd->plugin, LOG_DBG, "estimatefees failed, sending block_processed without feerates");
-	req = jsonrpc_request_start(info->cmd, "block_processed",
-				    block_processed_ack, block_processed_err, NULL);
-	json_add_u32(req->js, "blockheight", info->blockheight);
-	send_outreq(req);
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
-}
-
-/* Send block_processed notification to watchman, including fresh feerates */
-void bwatch_send_block_processed(struct command *cmd, u32 blockheight)
-{
-	struct out_req *req;
-	struct block_processed_info *info = tal(cmd, struct block_processed_info);
-
-	info->cmd = cmd;
-	info->blockheight = blockheight;
-
-	req = jsonrpc_request_start(cmd, "estimatefees",
-				    estimatefees_for_block_done,
-				    estimatefees_for_block_failed,
-				    info);
-	send_outreq(req);
+	json_add_u32(req->js, "blockheight", bwatch->current_height);
+	return send_outreq(req);
 }
 
 /* --- chaininfo: send chain name, IBD status to watchman on init --- */
@@ -174,7 +137,9 @@ static struct command_result *chaininfo_ack(struct command *cmd,
 					   const jsmntok_t *result UNUSED,
 					   void *unused UNUSED)
 {
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0), bwatch_poll_chain, NULL);
+	return timer_complete(cmd);
 }
 
 static struct command_result *chaininfo_err(struct command *cmd,
@@ -183,10 +148,12 @@ static struct command_result *chaininfo_err(struct command *cmd,
 					   const jsmntok_t *result,
 					   void *unused UNUSED)
 {
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	plugin_log(cmd->plugin, LOG_DBG,
 		   "chaininfo RPC failed: %.*s",
 		   json_tok_full_len(result), json_tok_full(buf, result));
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0), bwatch_poll_chain, NULL);
+	return timer_complete(cmd);
 }
 
 static struct command_result *chaininfo_getchaininfo_done(struct command *cmd,
@@ -210,7 +177,7 @@ static struct command_result *chaininfo_getchaininfo_done(struct command *cmd,
 	if (err) {
 		plugin_log(cmd->plugin, LOG_BROKEN,
 			   "getchaininfo parse failed: %s", err);
-		return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+		return timer_complete(cmd);
 	}
 
 	req = jsonrpc_request_start(cmd, "chaininfo",
@@ -219,8 +186,7 @@ static struct command_result *chaininfo_getchaininfo_done(struct command *cmd,
 	json_add_u32(req->js, "headercount", headercount);
 	json_add_u32(req->js, "blockcount", blockcount);
 	json_add_bool(req->js, "ibd", ibd);
-	send_outreq(req);
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	return send_outreq(req);
 }
 
 static struct command_result *chaininfo_getchaininfo_failed(struct command *cmd,
@@ -229,12 +195,14 @@ static struct command_result *chaininfo_getchaininfo_failed(struct command *cmd,
 							   const jsmntok_t *result UNUSED,
 							   void *unused UNUSED)
 {
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	plugin_log(cmd->plugin, LOG_BROKEN,
 		   "getchaininfo failed during chaininfo init");
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0), bwatch_poll_chain, NULL);
+	return timer_complete(cmd);
 }
 
-void bwatch_send_chaininfo(struct command *cmd)
+struct command_result *bwatch_send_chaininfo(struct command *cmd, void *unused UNUSED)
 {
 	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	struct out_req *req;
@@ -244,7 +212,7 @@ void bwatch_send_chaininfo(struct command *cmd)
 				    chaininfo_getchaininfo_failed,
 				    NULL);
 	json_add_u32(req->js, "last_height", bwatch->current_height);
-	send_outreq(req);
+	return send_outreq(req);
 }
 
 /*
@@ -618,9 +586,8 @@ static struct command_result *getwatchmanheight_done(struct command *cmd,
 		   bwatch->current_height, tal_count(bwatch->block_history),
 		   bwatch->poll_interval_ms);
 
-	/* Schedule poll timer so poll_chain runs with its own command lifecycle */
-	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0), bwatch_poll_chain, NULL);
-	return timer_complete(cmd);
+	/* Send chaininfo to set bitcoind->synced; poll timer starts after chaininfo completes */
+	return bwatch_send_chaininfo(cmd, NULL);
 }
 
 /*

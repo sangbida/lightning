@@ -77,6 +77,9 @@ void update_feerates(struct lightningd *ld,
 		     u32 feerate_floor,
 		     const struct feerate_est *rates TAKES);
 
+/* Start polling bitcoind for fee estimates every 30s (replaces chaintopology polling) */
+void start_fee_polling(struct lightningd *ld);
+
 /* In channel_control.c */
 void notify_feerate_change(struct lightningd *ld);
 

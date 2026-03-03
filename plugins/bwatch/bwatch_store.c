@@ -152,7 +152,21 @@ static const jsmntok_t *bwatch_get_datastore(const tal_t *ctx,
  * ============================================================================
  */
 
-void bwatch_add_block_to_datastore(struct command *cmd, const struct block_record_wire *br)
+/* Datastore write completed (success or expected failure such as duplicate).
+ * Either way, invoke the caller's continuation to keep the poll chain alive. */
+static struct command_result *block_store_done(struct command *cmd,
+					       const char *method UNNEEDED,
+					       const char *buf UNNEEDED,
+					       const jsmntok_t *result UNNEEDED,
+					       struct command_result *(*done)(struct command *))
+{
+	return done(cmd);
+}
+
+struct command_result *bwatch_add_block_to_datastore(
+	struct command *cmd,
+	const struct block_record_wire *br,
+	struct command_result *(*done)(struct command *cmd))
 {
 	/* Zero-pad to 10 digits for lexicographic sorting: ensures keys sort
 	 * numerically by height (e.g., "0000000100" < "0000000101") */
@@ -160,12 +174,17 @@ void bwatch_add_block_to_datastore(struct command *cmd, const struct block_recor
 					  take(tal_fmt(NULL, "%010u", br->height)));
 	const u8 *data = towire_bwatch_block(tmpctx, br);
 
-	jsonrpc_set_datastore_binary(cmd, key,
-				     data, tal_bytelen(data),
-				     "must-create",
-				     NULL, NULL, NULL);
-
 	plugin_log(cmd->plugin, LOG_DBG, "Added block %u to datastore", br->height);
+
+	/* Chain `done` as both success and failure continuation so the poll
+	 * cmd is held alive until the write is acknowledged, then handed off
+	 * to the next step.  Write failure (e.g. duplicate on restart) is
+	 * non-fatal — the poll must continue regardless. */
+	return jsonrpc_set_datastore_binary(cmd, key,
+					    data, tal_bytelen(data),
+					    "must-create",
+					    block_store_done, block_store_done,
+					    done);
 }
 
 void bwatch_add_block_to_history(struct bwatch *bwatch, u32 height,
@@ -227,6 +246,7 @@ void bwatch_utxoset_add(struct command *cmd,
 			const u8 *scriptpubkey, size_t scriptpubkey_len UNUSED,
 			struct amount_sat satoshis)
 {
+	struct command *aux;
 	/* The wire-gen struct uses u8 * (not const), but towire only reads it,
 	 * so stripping const here is safe. */
 	struct utxoset_entry_wire entry = {
@@ -243,9 +263,13 @@ void bwatch_utxoset_add(struct command *cmd,
 					  tal_fmt(tmpctx, "%u", outpoint->n));
 	const u8 *data = towire_bwatch_utxoset_entry(tmpctx, &entry);
 
-	/* create-or-replace: idempotent for rescan (same block processed twice) */
-	jsonrpc_set_datastore_binary(cmd, key, data, tal_bytelen(data),
-				     "create-or-replace", NULL, NULL, NULL);
+	/* create-or-replace: idempotent for rescan (same block processed twice).
+	 * Run this on an aux command so poll-cmd completion is owned only by
+	 * the block_processed chain. */
+	aux = aux_command(cmd);
+	jsonrpc_set_datastore_binary(aux, key, data, tal_bytelen(data),
+				     "create-or-replace",
+				     ignore_and_complete, ignore_and_complete, NULL);
 }
 
 /* Mark an existing utxoset entry as spent by setting its spendheight.
@@ -256,6 +280,7 @@ void bwatch_utxoset_spend(struct command *cmd,
 			 const struct bitcoin_outpoint *outpoint,
 			 u32 spendheight)
 {
+	struct command *aux;
 	const char **key = mkdatastorekey(tmpctx, "bwatch", "utxoset",
 					  fmt_bitcoin_txid(tmpctx, &outpoint->txid),
 					  tal_fmt(tmpctx, "%u", outpoint->n));
@@ -275,8 +300,10 @@ void bwatch_utxoset_spend(struct command *cmd,
 
 	entry->spendheight = spendheight;
 	data = towire_bwatch_utxoset_entry(tmpctx, entry);
-	jsonrpc_set_datastore_binary(cmd, key, data, tal_bytelen(data),
-				     "must-replace", NULL, NULL, NULL);
+	aux = aux_command(cmd);
+	jsonrpc_set_datastore_binary(aux, key, data, tal_bytelen(data),
+				     "must-replace",
+				     ignore_and_complete, ignore_and_complete, NULL);
 }
 
 /*
@@ -299,6 +326,7 @@ void bwatch_transaction_add(struct command *cmd,
 			    const struct bitcoin_tx *tx,
 			    u32 blockheight, u32 txindex)
 {
+	struct command *aux;
 	struct bitcoin_txid txid;
 	struct transaction_entry_wire entry;
 
@@ -312,8 +340,10 @@ void bwatch_transaction_add(struct command *cmd,
 					  fmt_bitcoin_txid(tmpctx, &txid));
 	const u8 *data = towire_bwatch_transaction_entry(tmpctx, &entry);
 
-	jsonrpc_set_datastore_binary(cmd, key, data, tal_bytelen(data),
-				     "create-or-replace", NULL, NULL, NULL);
+	aux = aux_command(cmd);
+	jsonrpc_set_datastore_binary(aux, key, data, tal_bytelen(data),
+				     "create-or-replace",
+				     ignore_and_complete, ignore_and_complete, NULL);
 }
 
 void bwatch_load_block_history(struct command *cmd, struct bwatch *bwatch)
@@ -638,9 +668,9 @@ struct watch *bwatch_add_watch(struct command *cmd,
 		 * points to w, so mutating w->owners is visible without re-adding. */
 		for (size_t i = 0; i < tal_count(w->owners); i++) {
 			if (streq(w->owners[i], owner_id)) {
-				plugin_log(cmd->plugin, LOG_UNUSUAL,
-					   "Owner %s already watching", owner_id);
-				return NULL;
+			plugin_log(cmd->plugin, LOG_DBG,
+				   "Owner %s already watching", owner_id);
+			return NULL;
 			}
 		}
 		if (start_block < w->start_block)

@@ -130,60 +130,47 @@ struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld)
 	return wm;
 }
 
-/* Callback when bwatch acknowledges a watch operation (success) */
-static void bwatch_ack_success(const char *buffer,
-				const jsmntok_t *idtok,
-				const jsmntok_t *methodtok,
-				const jsmntok_t *paramtoks,
-				struct watchman *wm)
-{
-	const char *op_id;
-	
-	/* Extract op_id from the response id */
-	if (!idtok) {
-		log_broken(wm->ld->log, "bwatch response missing id, cannot acknowledge operation");
-		return;
-	}
-	
-	op_id = json_strdup(tmpctx, buffer, idtok);
-	watchman_ack(wm->ld, op_id);
-	log_debug(wm->ld->log, "Acknowledged pending op: %s", op_id);
-}
+/* Per-request context for bwatch_ack_response. Carries the bare op_id so the
+ * callback never needs to parse the JSON-RPC response id. */
+struct bwatch_ack_arg {
+	struct watchman *wm;
+	const char *op_id;	/* bare "add:owner", "del:owner", "addutxo:owner" */
+};
 
-/* Callback when bwatch operation fails */
-static void bwatch_ack_error(const char *buffer,
-			      const jsmntok_t *toks,
-			      const jsmntok_t *idtok,
-			      struct watchman *wm)
+/* Single response callback for bwatch operations (handles both success and error).
+ * notify_cb is never called for RPC replies, so we only need response_cb. */
+static void bwatch_ack_response(const char *buffer,
+				const jsmntok_t *toks,
+				const jsmntok_t *idtok UNUSED,
+				struct bwatch_ack_arg *arg)
 {
-	const char *op_id;
-	const jsmntok_t *err;
-	
-	/* Extract op_id from the response id */
-	if (!idtok) {
-		log_broken(wm->ld->log, "bwatch error response missing id, cannot acknowledge operation");
-		return;
-	}
-	
-	op_id = json_strdup(tmpctx, buffer, idtok);
-	err = json_get_member(buffer, toks, "error");
+	const jsmntok_t *err = json_get_member(buffer, toks, "error");
+
 	if (err) {
-		log_unusual(wm->ld->log, "bwatch operation %s failed: %.*s",
-			    op_id, json_tok_full_len(err), json_tok_full(buffer, err));
+		log_unusual(arg->wm->ld->log, "bwatch operation %s failed: %.*s",
+			    arg->op_id, json_tok_full_len(err), json_tok_full(buffer, err));
 	} else {
-		log_unusual(wm->ld->log, "bwatch operation %s failed: unknown error", op_id);
+		log_debug(arg->wm->ld->log, "Acknowledged pending op: %s", arg->op_id);
 	}
-	
-	/* Still remove from queue - bwatch will handle it properly on replay */
-	watchman_ack(wm->ld, op_id);
+
+	watchman_ack(arg->wm->ld, arg->op_id);
 }
 
-/* Send an RPC request to the bwatch plugin */
+/* op_id is "add:owner", "del:owner", or "addutxo:owner"; return the owner suffix. */
+static const char *owner_from_op_id(const char *op_id)
+{
+	const char *colon = strchr(op_id, ':');
+	return colon ? colon + 1 : "";
+}
+
+/* Send an RPC request to the bwatch plugin.
+ * op_id must include owner as suffix after colon: "add:owner", "del:owner", "addutxo:owner". */
 static void send_to_bwatch(struct watchman *wm, const char *method,
 			   const char *op_id, const char *json_params)
 {
 	struct plugin *bwatch;
 	struct jsonrpc_request *req;
+	const char *owner;
 	size_t len;
 
 	/* Find bwatch plugin by the command it registers */
@@ -200,19 +187,46 @@ static void send_to_bwatch(struct watchman *wm, const char *method,
 		return;
 	}
 
-	req = jsonrpc_request_start(wm, method, op_id, bwatch->log,
-				     bwatch_ack_success, bwatch_ack_error, wm);
+	struct bwatch_ack_arg *arg = tal(tmpctx, struct bwatch_ack_arg);
+	arg->wm = wm;
+	arg->op_id = tal_strdup(arg, op_id);
 
-	/* json_params is a JSON object string like {"key":"value"}.
-	 * jsonrpc_request_start already opened "params":{, so skip outer braces */
+	req = jsonrpc_request_start(wm, method, op_id, bwatch->log,
+				     NULL, bwatch_ack_response, arg);
+
+	/* Parent arg to req so it's freed when the request is freed,
+	 * regardless of whether the callback fires. */
+	tal_steal(req, arg);
+
+	owner = owner_from_op_id(op_id);
+	if (!streq(owner, ""))
+		json_add_string(req->stream, "owner", owner);
+
+	/* json_params is a JSON object string like {"type":"...","scriptpubkey":"...","start_block":N}.
+	 * Append the rest (skip outer braces) so we get type, scriptpubkey, start_block, etc. */
 	len = strlen(json_params);
-	if (len >= 2 && json_params[0] == '{' && json_params[len-1] == '}')
+	if (len >= 2 && json_params[0] == '{' && json_params[len-1] == '}') {
+		json_stream_append(req->stream, ",", 1);
 		json_stream_append(req->stream, json_params + 1, len - 2);
-	else
+	} else {
+		json_stream_append(req->stream, ",", 1);
 		json_stream_append(req->stream, json_params, len);
+	}
 
 	jsonrpc_request_end(req);
 	plugin_request_send(bwatch, req);
+}
+
+/* Queue an operation, persist it for crash recovery, and send to bwatch. */
+static void enqueue_op(struct watchman *wm, const char *method,
+		       const char *op_id, const char *json_params)
+{
+	struct pending_op *op = tal(wm, struct pending_op);
+	op->op_id = tal_strdup(op, op_id);
+	op->json_params = tal_strdup(op, json_params);
+	tal_arr_expand(&wm->pending_ops, op);
+	db_save(wm, op);
+	send_to_bwatch(wm, method, op_id, json_params);
 }
 
 /**
@@ -225,18 +239,12 @@ void watchman_add(struct lightningd *ld, const char *owner, const char *json_par
 {
 	struct watchman *wm = ld->watchman;
 	char *op_id = tal_fmt(tmpctx, "add:%s", owner);
-	struct pending_op *op = tal(wm, struct pending_op);
 
 	/* Remove any existing add for this owner to avoid UNIQUE constraint
 	 * when BIP32 and BIP86 both register the same key (e.g. wallet/p2wpkh/0) */
 	watchman_ack(ld, op_id);
 
-	op->op_id = tal_strdup(op, op_id);
-	op->json_params = tal_strdup(op, json_params);
-
-	tal_arr_expand(&wm->pending_ops, op);
-	db_save(wm, op);
-	send_to_bwatch(wm, "addwatch", op_id, json_params);
+	enqueue_op(wm, "addwatch", op_id, json_params);
 }
 
 /**
@@ -250,24 +258,20 @@ void watchman_del(struct lightningd *ld, const char *owner, const char *json_par
 {
 	struct watchman *wm = ld->watchman;
 	char *op_id = tal_fmt(tmpctx, "del:%s", owner);
-	struct pending_op *op = tal(wm, struct pending_op);
 
 	/* Cancel any pending add for this owner; we're replacing it with a del */
 	watchman_ack(ld, tal_fmt(tmpctx, "add:%s", owner));
 
-	op->op_id = tal_strdup(op, op_id);
-	op->json_params = tal_strdup(op, json_params);
-
-	tal_arr_expand(&wm->pending_ops, op);
-	db_save(wm, op);
-	send_to_bwatch(wm, "delwatch", op_id, json_params);
+	enqueue_op(wm, "delwatch", op_id, json_params);
 }
 
 /**
  * watchman_ack - Acknowledge a completed watch operation
  *
- * Called when bwatch confirms it has processed an add/del operation.
+ * Called when bwatch confirms it has processed an add/del/addutxo operation.
  * Removes the operation from the pending queue and datastore.
+ * op_id must be the bare stored id (e.g. "add:wallet/p2wpkh/0"), not the
+ * full JSON-RPC response id.
  */
 void watchman_ack(struct lightningd *ld, const char *op_id)
 {
@@ -295,7 +299,17 @@ void watchman_replay_pending(struct lightningd *ld)
 
 	for (size_t i = 0; i < tal_count(wm->pending_ops); i++) {
 		struct pending_op *op = wm->pending_ops[i];
-		const char *method = strstarts(op->op_id, "add:") ? "addwatch" : "delwatch";
+		const char *method;
+		if (strstarts(op->op_id, "add:"))
+			method = "addwatch";
+		else if (strstarts(op->op_id, "del:"))
+			method = "delwatch";
+		else if (strstarts(op->op_id, "addutxo:"))
+			method = "addutxo";
+		else {
+			log_broken(wm->ld->log, "Unknown pending op type: %s", op->op_id);
+			continue;
+		}
 		send_to_bwatch(wm, method, op->op_id, op->json_params);
 	}
 }
@@ -548,21 +562,11 @@ void watchman_add_utxo(struct lightningd *ld,
 	struct json_stream *js;
 	size_t len;
 	char *json_params;
-	struct plugin *bwatch;
 
 	if (!wm)
 		return;
 
-	bwatch = find_plugin_for_command(ld, "addutxo");
-	if (!bwatch) {
-		log_debug(ld->log, "bwatch plugin not found, skipping addutxo");
-		return;
-	}
-	if (bwatch->plugin_state != INIT_COMPLETE) {
-		log_debug(ld->log, "bwatch not ready (state %d), skipping addutxo",
-			  bwatch->plugin_state);
-		return;
-	}
+	const char *op_id = tal_fmt(tmpctx, "addutxo:%s", owner);
 
 	js = new_json_stream(tmpctx, NULL, NULL);
 	json_object_start(js, NULL);
@@ -571,11 +575,11 @@ void watchman_add_utxo(struct lightningd *ld,
 	json_add_u32(js, "txindex", txindex);
 	json_add_hex(js, "scriptpubkey", script, script_len);
 	json_add_u64(js, "satoshis", sat.satoshis);
-	json_add_string(js, "owner", owner);
 	json_object_end(js);
 
 	json_params = tal_strndup(tmpctx, json_out_contents(js->jout, &len), len);
-	send_to_bwatch(wm, "addutxo", "addutxo", json_params);
+
+	enqueue_op(wm, "addutxo", op_id, json_params);
 }
 
 /* Dispatch table - add new watch types here */
@@ -789,6 +793,10 @@ static struct command_result *json_getwatchmanheight(struct command *cmd,
 	height = wm ? wm->last_processed_height : 0;
 	log_debug(cmd->ld->log, "getwatchmanheight: returning height=%u (wm=%s)",
 		  height, wm ? "ok" : "NULL");
+	/* Replay pending watch ops now — we're sending height to bwatch, so bwatch
+	 * is ready to receive addwatch/delwatch. Ops queued during startup get sent. */
+	if (wm)
+		watchman_replay_pending(cmd->ld);
 	response = json_stream_success(cmd);
 	json_add_u32(response, "height", height);
 	return command_success(cmd, response);

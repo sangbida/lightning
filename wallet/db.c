@@ -97,11 +97,14 @@ static void db_error(struct lightningd *ld, bool fatal, const char *fmt, va_list
 }
 
 struct db *db_setup(const tal_t *ctx, struct lightningd *ld,
-		    const struct ext_key *bip32_base)
+		    const struct ext_key *bip32_base, struct db **db_out)
 {
 	struct db *db = db_open(ctx, ld->wallet_dsn, ld->developer, true,
 				db_error, ld);
 	bool migrated;
+
+	if (db_out)
+		*db_out = db;
 
 	db->report_changes_fn = plugin_hook_db_sync;
 
@@ -153,83 +156,6 @@ void migrate_our_funding(struct lightningd *ld, struct db *db)
 		db_fatal(stmt->db,
 			 "Error migrating funding satoshis to our_funding (%s)",
 			 stmt->error);
-
-	tal_free(stmt);
-}
-
-void fillin_missing_scriptpubkeys(struct lightningd *ld, struct db *db)
-{
-	struct db_stmt *stmt;
-
-	stmt = db_prepare_v2(db, SQL("SELECT"
-				     " type"
-				     ", keyindex"
-				     ", prev_out_tx"
-				     ", prev_out_index"
-				     ", channel_id"
-				     ", peer_id"
-				     ", commitment_point"
-				     " FROM outputs"
-				     " WHERE scriptpubkey IS NULL;"));
-
-	db_query_prepared(stmt);
-	while (db_step(stmt)) {
-		int type;
-		u8 *scriptPubkey;
-		struct bitcoin_txid txid;
-		u32 outnum, keyindex;
-		struct pubkey key;
-		struct db_stmt *update_stmt;
-
-		type = db_col_int(stmt, "type");
-		keyindex = db_col_int(stmt, "keyindex");
-		db_col_txid(stmt, "prev_out_tx", &txid);
-		outnum = db_col_int(stmt, "prev_out_index");
-
-		/* This indiciates whether or not we have 'close_info' */
-		if (!db_col_is_null(stmt, "channel_id")) {
-			struct pubkey *commitment_point;
-			struct node_id peer_id;
-			u64 channel_id;
-			u8 *msg;
-
-			channel_id = db_col_u64(stmt, "channel_id");
-			db_col_node_id(stmt, "peer_id", &peer_id);
-			commitment_point = db_col_optional(stmt, stmt, "commitment_point", pubkey);
-
-			/* Have to go ask the HSM to derive the pubkey for us */
-			msg = towire_hsmd_get_output_scriptpubkey(NULL,
-								 channel_id,
-								 &peer_id,
-								 commitment_point);
-			if (!wire_sync_write(ld->hsm_fd, take(msg)))
-				fatal("Could not write to HSM: %s", strerror(errno));
-			msg = wire_sync_read(stmt, ld->hsm_fd);
-			if (!fromwire_hsmd_get_output_scriptpubkey_reply(stmt, msg,
-									&scriptPubkey))
-				fatal("HSM gave bad hsm_get_output_scriptpubkey_reply %s",
-				      tal_hex(msg, msg));
-		} else {
-			db_col_ignore(stmt, "peer_id");
-			db_col_ignore(stmt, "commitment_point");
-			bip32_pubkey(ld, &key, keyindex);
-			if (type == WALLET_OUTPUT_P2SH_WPKH) {
-				u8 *redeemscript = bitcoin_redeem_p2sh_p2wpkh(stmt, &key);
-				scriptPubkey = scriptpubkey_p2sh(tmpctx, redeemscript);
-			} else
-				scriptPubkey = scriptpubkey_p2wpkh(stmt, &key);
-		}
-
-		update_stmt = db_prepare_v2(db, SQL("UPDATE outputs"
-						    " SET scriptpubkey = ?"
-						    " WHERE prev_out_tx = ? "
-						    "   AND prev_out_index = ?"));
-		db_bind_blob(update_stmt, scriptPubkey, tal_bytelen(scriptPubkey));
-		db_bind_txid(update_stmt, &txid);
-		db_bind_int(update_stmt, outnum);
-		db_exec_prepared_v2(update_stmt);
-		tal_free(update_stmt);
-	}
 
 	tal_free(stmt);
 }

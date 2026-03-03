@@ -77,6 +77,7 @@
 #include <lightningd/plugin_hook.h>
 #include <lightningd/runes.h>
 #include <lightningd/subd.h>
+#include <lightningd/feerate.h>
 #include <lightningd/watchman.h>
 #include <sys/resource.h>
 #include <wallet/invoices.h>
@@ -353,6 +354,7 @@ static struct lightningd *new_lightningd(const tal_t *ctx)
 	ld->bitcoind = NULL;
 	ld->outgoing_txs = new_htable(ld, outgoing_tx_map);
 	ld->rebroadcast_timer = NULL;
+	ld->fee_poll = NULL;
 
 	/*~ We need some funds to help CPFP spend unilateral closes.  How
 	 * much?  But let's assume we want to boost the commitment tx (1112
@@ -1375,6 +1377,10 @@ int main(int argc, char *argv[])
 
 	ld->bitcoind = new_bitcoind(ld, ld, ld->log);
 	bitcoind_check_commands(ld->bitcoind);
+
+	/*~ Poll bitcoind for fee estimates every 30s (replaces chaintopology polling).
+	 * bwatch only reports blockheight via block_processed; it no longer calls estimatefees. */
+	start_fee_polling(ld);
 
 	db_begin_transaction(ld->wallet->db);
 	trace_span_start("delete_old_htlcs", ld->wallet);

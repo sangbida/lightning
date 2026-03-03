@@ -478,7 +478,7 @@ int main(int argc, const char *argv[])
 	ld->wallet_dsn = tal_fmt(ld, "sqlite3://%s", filename);
 	ld->developer = false;
 	ld->wallet = w = tal(ld, struct wallet);
-	ld->wallet->db = db_setup(ld->wallet, ld, NULL);
+	ld->wallet->db = db_setup(ld->wallet, ld, NULL, NULL);
 
 	memset(&cid, 1, sizeof(cid));
 	memset(&txid, 2, sizeof(txid));

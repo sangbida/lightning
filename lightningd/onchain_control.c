@@ -546,12 +546,6 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 			  scriptPubkey, tal_bytelen(scriptPubkey), amount,
 			  tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid));
 
-	wallet_add_onchaind_utxo(channel->peer->ld->wallet,
-				 &outpoint, scriptPubkey,
-				 blockheight, amount, channel,
-				 commitment_point,
-				 csv_lock);
-
 	mvt = new_coin_wallet_deposit(msg, &outpoint, blockheight,
 			              amount, mk_mvt_tags(MVT_DEPOSIT));
 	mvt->originating_acct = new_mvt_account_id(mvt, channel, NULL);

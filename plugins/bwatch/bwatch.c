@@ -179,17 +179,23 @@ static struct command_result *handle_block(struct command *cmd,
 	bwatch->current_height = *block_height;
 	bwatch->current_blockhash = blockhash;
 
-	/* Persist to datastore, then update in-memory history */
-	struct block_record_wire br = { *block_height, blockhash, block->hdr.prev_hash };
-	bwatch_add_block_to_datastore(cmd, &br);
+	/* Update in-memory history immediately (no async dependency) */
 	bwatch_add_block_to_history(bwatch, *block_height, &blockhash, &block->hdr.prev_hash);
 
-	/* Notify watchman that we've processed this block */
-	bwatch_send_block_processed(cmd, *block_height);
-
-	/* Schedule immediate re-poll to check if there are more blocks */
-	bwatch->poll_timer = global_timer(cmd->plugin, time_from_sec(0), bwatch_poll_chain, NULL);
-	return timer_complete(cmd);
+	/* Chain: persist block to datastore, then notify watchman of the new
+	 * height.  These two steps must be sequential on the same poll cmd:
+	 *   1. bwatch_add_block_to_datastore issues a datastore write and
+	 *      holds the cmd until the acknowledgement arrives.
+	 *   2. Only then does bwatch_send_block_processed run, issuing the
+	 *      block_processed RPC to watchman on the same cmd.
+	 *   3. block_processed_ack schedules the next poll.
+	 *
+	 * Running them in parallel on the same cmd would cause a race:
+	 * ignore_and_complete (used when no callback is supplied) frees the
+	 * cmd as soon as the first reply arrives, making the second RPC's
+	 * reply arrive with an unknown id and breaking the poll chain. */
+	struct block_record_wire br = { *block_height, blockhash, block->hdr.prev_hash };
+	return bwatch_add_block_to_datastore(cmd, &br, bwatch_send_block_processed);
 }
 
 /* Handle getchaininfo response */
@@ -302,8 +308,6 @@ static struct command_result *rescan_block_done(struct command *cmd,
 		return fetch_block_rescan(cmd, rescan->current_block, rescan_block_done, rescan);
 
 	/* Rescan complete */
-	bwatch_send_block_processed(cmd, rescan->target_block);
-
 	plugin_log(cmd->plugin, LOG_INFORM, "Rescan complete");
 	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 }

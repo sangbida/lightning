@@ -19,9 +19,11 @@ struct db;
  *  @ctx: the tal_t context to allocate from
  *  @ld: the lightningd context to hand to upgrade functions.
  *  @bip32_base: the base all of our pubkeys are constructed on
+ *  @db_out: if non-NULL, set to db right after open so migration callbacks
+ *           can use the wallet (e.g. ld->wallet->db) before db_setup returns
  */
 struct db *db_setup(const tal_t *ctx, struct lightningd *ld,
-		    const struct ext_key *bip32_base);
+		    const struct ext_key *bip32_base, struct db **db_out);
 
 /* We store last wait indices in our var table. */
 void load_indexes(struct db *db, struct indexes *indexes);

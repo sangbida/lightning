@@ -316,9 +316,6 @@ void fillin_missing_lease_satoshi(struct lightningd *ld UNNEEDED,
 void fillin_missing_local_basepoints(struct lightningd *ld UNNEEDED,
 				     struct db *db UNNEEDED)
 { fprintf(stderr, "fillin_missing_local_basepoints called!\n"); abort(); }
-/* Generated stub for fillin_missing_scriptpubkeys */
-void fillin_missing_scriptpubkeys(struct lightningd *ld UNNEEDED, struct db *db UNNEEDED)
-{ fprintf(stderr, "fillin_missing_scriptpubkeys called!\n"); abort(); }
 /* Generated stub for insert_addrtype_to_addresses */
 void insert_addrtype_to_addresses(struct lightningd *ld UNNEEDED,
 				  struct db *db UNNEEDED)

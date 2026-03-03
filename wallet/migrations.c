@@ -648,7 +648,7 @@ static const struct db_migration dbmigrations[] = {
     {SQL("INSERT INTO vars (name, intval) VALUES ('coin_moves_count', 0);"), NULL},
     {NULL, migrate_last_tx_to_psbt},
     {SQL("ALTER TABLE outputs ADD reserved_til INTEGER DEFAULT NULL;"), NULL},
-    {NULL, fillin_missing_scriptpubkeys},
+    {NULL, NULL}, /* was fillin_missing_scriptpubkeys; outputs table deprecated */
     /* option_anchor_outputs is nailed at creation time. */
     {SQL("ALTER TABLE channels ADD COLUMN option_anchor_outputs INTEGER"
 	 " DEFAULT 0;"), NULL },

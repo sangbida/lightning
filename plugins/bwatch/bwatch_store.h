@@ -56,7 +56,10 @@ HTABLE_DEFINE_NODUPS_TYPE(struct watch, scid_watch_keyof,
 const char *bwatch_get_watch_type_name(enum watch_type type);
 
 /* Block operations */
-void bwatch_add_block_to_datastore(struct command *cmd, const struct block_record_wire *br);
+struct command_result *bwatch_add_block_to_datastore(
+	struct command *cmd,
+	const struct block_record_wire *br,
+	struct command_result *(*done)(struct command *cmd));
 void bwatch_add_block_to_history(struct bwatch *bwatch, u32 height,
 				  const struct bitcoin_blkid *hash,
 				  const struct bitcoin_blkid *prev_hash);
