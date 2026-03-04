@@ -130,4 +130,9 @@ const jsmntok_t *bwatch_get_transaction(const tal_t *ctx,
 					const struct bitcoin_txid *txid,
 					const char **buf_out);
 
+/* Return all stored transaction entries as a tal-allocated array.
+ * Mirrors wallet_transactions_get(); entries are allocated under ctx. */
+struct transaction_entry_wire **bwatch_get_all_transactions(const tal_t *ctx,
+							   struct command *cmd);
+
 #endif /* LIGHTNING_PLUGINS_BWATCH_BWATCH_STORE_H */

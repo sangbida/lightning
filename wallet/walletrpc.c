@@ -588,103 +588,10 @@ static const struct json_command dev_rescan_output_command = {
 };
 AUTODATA(json_command, &dev_rescan_output_command);
 
-struct {
-	enum wallet_tx_type t;
-	const char *name;
-} wallet_tx_type_display_names[] = {
-    {TX_THEIRS, "theirs"},
-    {TX_WALLET_DEPOSIT, "deposit"},
-    {TX_WALLET_WITHDRAWAL, "withdraw"},
-    {TX_CHANNEL_FUNDING, "channel_funding"},
-    {TX_CHANNEL_CLOSE, "channel_mutual_close"},
-    {TX_CHANNEL_UNILATERAL, "channel_unilateral_close"},
-    {TX_CHANNEL_SWEEP, "channel_sweep"},
-    {TX_CHANNEL_HTLC_SUCCESS, "channel_htlc_success"},
-    {TX_CHANNEL_HTLC_TIMEOUT, "channel_htlc_timeout"},
-    {TX_CHANNEL_PENALTY, "channel_penalty"},
-    {TX_CHANNEL_CHEAT, "channel_unilateral_cheat"},
-};
+/* listtransactions is now handled by the bwatch plugin. */
 
-static void json_transaction_details(struct json_stream *response,
-				     const struct wallet_transaction *tx)
-{
-	struct wally_tx *wtx = tx->tx->wtx;
-
-		json_object_start(response, NULL);
-		json_add_txid(response, "hash", &tx->id);
-		json_add_hex_talarr(response, "rawtx", tx->rawtx);
-		json_add_num(response, "blockheight", tx->blockheight);
-		json_add_num(response, "txindex", tx->txindex);
-		json_add_u32(response, "locktime", wtx->locktime);
-		json_add_u32(response, "version", wtx->version);
-
-		json_array_start(response, "inputs");
-		for (size_t i = 0; i < wtx->num_inputs; i++) {
-			struct bitcoin_txid prevtxid;
-			struct wally_tx_input *in = &wtx->inputs[i];
-			bitcoin_tx_input_get_txid(tx->tx, i, &prevtxid);
-
-			json_object_start(response, NULL);
-			json_add_txid(response, "txid", &prevtxid);
-			json_add_u32(response, "index", in->index);
-			json_add_u32(response, "sequence", in->sequence);
-			json_object_end(response);
-		}
-		json_array_end(response);
-
-		json_array_start(response, "outputs");
-		for (size_t i = 0; i < wtx->num_outputs; i++) {
-			struct wally_tx_output *out = &wtx->outputs[i];
-			struct amount_asset amt = bitcoin_tx_output_get_amount(tx->tx, i);
-			struct amount_sat sat;
-
-			/* TODO We should eventually handle non-bitcoin assets as well. */
-			if (amount_asset_is_main(&amt))
-				sat = amount_asset_to_sat(&amt);
-			else
-				sat = AMOUNT_SAT(0);
-
-			json_object_start(response, NULL);
-
-			json_add_u32(response, "index", i);
-			json_add_amount_sat_msat(response, "amount_msat", sat);
-
-			json_add_hex(response, "scriptPubKey", out->script, out->script_len);
-
-			json_object_end(response);
-		}
-		json_array_end(response);
-
-		json_object_end(response);
-}
-
-static struct command_result *json_listtransactions(struct command *cmd,
-						      const char *buffer,
-						      const jsmntok_t *obj UNNEEDED,
-						      const jsmntok_t *params)
-{
-	struct json_stream *response;
-	struct wallet_transaction *txs;
-
-	if (!param(cmd, buffer, params, NULL))
-		return command_param_failed();
-
-	txs = wallet_transactions_get(cmd, cmd->ld->wallet);
-
-	response = json_stream_success(cmd);
-	json_array_start(response, "transactions");
-	for (size_t i = 0; i < tal_count(txs); i++)
-		json_transaction_details(response, &txs[i]);
-
-	json_array_end(response);
-	return command_success(cmd, response);
-}
-
-static const struct json_command listtransactions_command = {
-    "listtransactions",
-    json_listtransactions,
-};
-AUTODATA(json_command, &listtransactions_command);
+/* listtransactions is now handled by the bwatch plugin, which stores
+ * confirmed transactions that matched watched scriptpubkeys. */
 
 static bool in_only_inputs(const u32 *only_inputs, u32 this)
 {

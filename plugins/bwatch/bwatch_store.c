@@ -322,6 +322,32 @@ const jsmntok_t *bwatch_get_transaction(const tal_t *ctx,
 	return bwatch_get_datastore(ctx, cmd, key, buf_out);
 }
 
+struct transaction_entry_wire **bwatch_get_all_transactions(const tal_t *ctx,
+							   struct command *cmd)
+{
+	const char *buf;
+	const jsmntok_t *datastore, *t;
+	size_t i;
+	struct transaction_entry_wire **txs = tal_arr(ctx, struct transaction_entry_wire *, 0);
+
+	datastore = bwatch_list_datastore(tmpctx, cmd, "bwatch", "transactions", &buf);
+
+	json_for_each_arr(i, t, datastore) {
+		const jsmntok_t *hex_tok = json_get_member(buf, t, "hex");
+		if (!hex_tok)
+			continue;
+		const u8 *data = json_tok_bin_from_hex(tmpctx, buf, hex_tok);
+		if (!data)
+			continue;
+		struct transaction_entry_wire *entry;
+		if (!fromwire_bwatch_transaction_entry(ctx, data, &entry))
+			continue;
+		tal_arr_expand(&txs, entry);
+	}
+
+	return txs;
+}
+
 void bwatch_transaction_add(struct command *cmd,
 			    const struct bitcoin_tx *tx,
 			    u32 blockheight, u32 txindex)

@@ -5053,10 +5053,9 @@ def test_bwatch_outpoint_watch_notifies_lightningd(node_factory, bitcoind):
     l1.daemon.wait_for_log(r'No block change')
     l2.daemon.wait_for_log(r'No block change')
 
-    # Fund l1 manually: listtransactions (used by fundwallet) reads a raw-block
-    # populated table that bwatch doesn't fill; listfunds reads the outputs table
-    # which bwatch DOES populate via watch_found.
-    addr = l1.rpc.newaddr()['bech32']
+    # Fund l1 manually using listfunds to detect confirmation (bwatch populates
+    # the outputs table via watch_found when the scriptpubkey watch fires).
+    addr = l1.rpc.newaddr('p2tr')['p2tr']
     bitcoind.rpc.sendtoaddress(addr, 10.0)
     bitcoind.generate_block(1)
     wait_for(lambda: len(l1.rpc.listfunds()['outputs']) > 0, timeout=60)

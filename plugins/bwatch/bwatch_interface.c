@@ -684,6 +684,85 @@ struct command_result *json_bwatch_get_transaction(struct command *cmd,
 	return command_finished(cmd, response);
 }
 
+/*
+ * ============================================================================
+ * listtransactions RPC
+ *
+ * Returns all transactions bwatch has stored (i.e. those that matched a
+ * watched scriptpubkey), in the same format as the old wallet listtransactions.
+ * ============================================================================
+ */
+
+static void json_add_transaction(struct json_stream *response,
+				 const struct transaction_entry_wire *entry)
+{
+	const u8 *cursor = entry->rawtx;
+	size_t max = tal_bytelen(entry->rawtx);
+	struct bitcoin_tx *tx = pull_bitcoin_tx(tmpctx, &cursor, &max);
+	struct wally_tx *wtx;
+
+	if (!tx)
+		return;
+	wtx = tx->wtx;
+
+	json_object_start(response, NULL);
+	json_add_txid(response, "hash", &entry->txid);
+	json_add_hex(response, "rawtx", entry->rawtx, tal_bytelen(entry->rawtx));
+	json_add_u32(response, "blockheight", entry->blockheight);
+	json_add_u32(response, "txindex", entry->txindex);
+	json_add_u32(response, "locktime", wtx->locktime);
+	json_add_u32(response, "version", wtx->version);
+
+	json_array_start(response, "inputs");
+	for (size_t i = 0; i < wtx->num_inputs; i++) {
+		struct bitcoin_txid prevtxid;
+		bitcoin_tx_input_get_txid(tx, i, &prevtxid);
+		json_object_start(response, NULL);
+		json_add_txid(response, "txid", &prevtxid);
+		json_add_u32(response, "index", wtx->inputs[i].index);
+		json_add_u32(response, "sequence", wtx->inputs[i].sequence);
+		json_object_end(response);
+	}
+	json_array_end(response);
+
+	json_array_start(response, "outputs");
+	for (size_t i = 0; i < wtx->num_outputs; i++) {
+		struct amount_asset amt = bitcoin_tx_output_get_amount(tx, i);
+		struct amount_sat sat = amount_asset_is_main(&amt)
+			? amount_asset_to_sat(&amt) : AMOUNT_SAT(0);
+		json_object_start(response, NULL);
+		json_add_u32(response, "index", i);
+		json_add_amount_sat_msat(response, "amount_msat", sat);
+		json_add_hex(response, "scriptPubKey",
+			     wtx->outputs[i].script, wtx->outputs[i].script_len);
+		json_object_end(response);
+	}
+	json_array_end(response);
+
+	json_object_end(response);
+}
+
+struct command_result *json_bwatch_list_transactions(struct command *cmd,
+						     const char *buffer,
+						     const jsmntok_t *params)
+{
+	struct transaction_entry_wire **txs;
+	struct json_stream *response;
+
+	if (!param(cmd, buffer, params, NULL))
+		return command_param_failed();
+
+	txs = bwatch_get_all_transactions(tmpctx, cmd);
+
+	response = jsonrpc_stream_success(cmd);
+	json_array_start(response, "transactions");
+	for (size_t i = 0; i < tal_count(txs); i++)
+		json_add_transaction(response, txs[i]);
+	json_array_end(response);
+
+	return command_finished(cmd, response);
+}
+
 /* Timer callback to sync with watchman before starting normal polling */
 struct command_result *bwatch_sync_with_watchman(struct command *cmd, void *unused UNUSED)
 {
