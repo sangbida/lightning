@@ -10,13 +10,84 @@
 #include <wallet/account_migration.h>
 #include <wallet/db.h>
 #include <wallet/migrations.h>
+#include <wallet/wallet.h>
 
 static const char *revert_too_early(const tal_t *ctx, struct db *db)
 {
 	return tal_strdup(ctx, "Downgrade to before v25.09 not supported");
 }
 
-/* Don't allow downgrade if they've *used* the withheld column. */
+void migrate_backfill_bwatch_tables(struct lightningd *ld, struct db *db)
+{
+	struct db_stmt *stmt;
+
+	/* Backfill old utxoset → our_outputs row by row so we can derive and
+	 * store the HD keyindex for each scriptpubkey.  bip32_base is already
+	 * populated at migration time (HSM starts before wallet_new). */
+	stmt = db_prepare_v2(db,
+		SQL("SELECT txid, outnum, blockheight, txindex, "
+		    "       scriptpubkey, satoshis, spendheight "
+		    "FROM utxoset "
+		    "WHERE blockheight IS NOT NULL "
+		    "  AND scriptpubkey IS NOT NULL "
+		    "  AND satoshis IS NOT NULL;"));
+	db_query_prepared(stmt);
+
+	while (db_step(stmt)) {
+		struct db_stmt *ins;
+		struct bitcoin_txid txid;
+		u32 outnum, blockheight;
+		struct amount_sat sat;
+		const u8 *script = db_col_arr(tmpctx, stmt, "scriptpubkey", u8);
+		size_t script_len = tal_bytelen(script);
+		u32 keyindex;
+		bool have_keyidx;
+
+		db_col_txid(stmt, "txid", &txid);
+		outnum      = db_col_int(stmt, "outnum");
+		blockheight = db_col_int(stmt, "blockheight");
+		sat         = db_col_amount_sat(stmt, "satoshis");
+
+		have_keyidx = wallet_scriptpubkey_to_keyidx(ld, db,
+							    script, script_len,
+							    &keyindex, NULL);
+
+		ins = db_prepare_v2(db,
+			SQL("INSERT OR IGNORE INTO our_outputs "
+			    "(txid, outnum, blockheight, txindex, "
+			    " scriptpubkey, satoshis, spendheight, keyindex) "
+			    "VALUES (?, ?, ?, ?, ?, ?, ?, ?);"));
+		db_bind_txid(ins, &txid);
+		db_bind_int(ins, outnum);
+		db_bind_int(ins, blockheight);
+		if (db_col_is_null(stmt, "txindex"))
+			db_bind_null(ins);
+		else
+			db_bind_int(ins, db_col_int(stmt, "txindex"));
+		db_bind_blob(ins, script, script_len);
+		db_bind_amount_sat(ins, sat);
+		if (db_col_is_null(stmt, "spendheight"))
+			db_bind_null(ins);
+		else
+			db_bind_int(ins, db_col_int(stmt, "spendheight"));
+		if (have_keyidx)
+			db_bind_int(ins, keyindex);
+		else
+			db_bind_null(ins);
+		db_exec_prepared_v2(take(ins));
+	}
+	tal_free(stmt);
+
+	/* Backfill old transactions → our_txs (pure SQL, no derivation needed). */
+	stmt = db_prepare_v2(db,
+		SQL("INSERT OR IGNORE INTO our_txs "
+		    "(txid, blockheight, txindex, rawtx) "
+		    "SELECT id, blockheight, txindex, rawtx "
+		    "FROM transactions "
+		    "WHERE blockheight IS NOT NULL AND rawtx IS NOT NULL;"));
+	db_exec_prepared_v2(take(stmt));
+}
+
 static const char *revert_withheld_column(const tal_t *ctx, struct db *db)
 {
 	struct db_stmt *stmt;
@@ -1078,6 +1149,43 @@ static const struct db_migration dbmigrations[] = {
      /* Need to make sure that withheld isn't used. */
      NULL, revert_withheld_column},
     /* ^v25.12 */
+
+    /* ^v25.12 / v26.04 */
+    {SQL("CREATE TABLE our_outputs ("
+	 "  txid BLOB NOT NULL,"
+	 "  outnum INTEGER NOT NULL,"
+	 "  blockheight INTEGER NOT NULL,"
+	 "  txindex INTEGER,"
+	 "  scriptpubkey BLOB NOT NULL,"
+	 "  satoshis BIGINT NOT NULL,"
+	 "  spendheight INTEGER,"
+	 "  keyindex INTEGER,"
+	 "  reserved_til INTEGER,"
+	 "  PRIMARY KEY (txid, outnum)"
+	 ")"), NULL,
+     SQL("DROP TABLE our_outputs"), NULL},
+    {SQL("CREATE TABLE our_txs ("
+	 "  txid BLOB NOT NULL PRIMARY KEY,"
+	 "  blockheight INTEGER NOT NULL,"
+	 "  txindex INTEGER,"
+	 "  rawtx BLOB"
+	 ")"), NULL,
+     SQL("DROP TABLE our_txs"), NULL},
+    {SQL("CREATE TABLE our_channel_txs ("
+	 "  id BIGSERIAL,"
+	 "  channel_id BIGINT REFERENCES channels(id),"
+	 "  type INTEGER,"
+	 "  transaction_id BLOB REFERENCES our_txs(txid),"
+	 "  input_num INTEGER,"
+	 "  blockheight INTEGER,"
+	 "  PRIMARY KEY (id)"
+	 ")"), NULL,
+     SQL("DROP TABLE our_channel_txs"), NULL},
+    /* Backfill old utxoset → our_outputs, old transactions → our_txs.
+     * No revert needed: the blocks table is untouched by the new code so
+     * the downgraded topology-driven release naturally rescans from its
+     * last recorded height and repopulates utxoset/transactions itself. */
+    {NULL, migrate_backfill_bwatch_tables, NULL, NULL},
 
 };
 

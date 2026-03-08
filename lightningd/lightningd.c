@@ -1432,8 +1432,8 @@ int main(int argc, char *argv[])
 	/*~ "onchaind" is a dumb daemon which tries to get our funds back: it
 	 * doesn't handle reorganizations, but it's idempotent, so we can
 	 * simply just restart it if the chain moves.  On startup, restart
-	 * onchaind for any channels that have a recorded funding spend (we
-	 * crashed before fully processing the close). */
+	 * onchaind for any channels that have a recorded funding spend in
+	 * our_channel_txs (we crashed before fully processing the close). */
 	onchaind_restart_closed_channels(ld);
 
 	/*~ Now handle sigchld, so we can clean up appropriately. */

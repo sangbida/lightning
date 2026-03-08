@@ -108,31 +108,4 @@ const char **bwatch_prune_watches_added_at_or_after(const tal_t *ctx,
 						    struct bwatch *bwatch,
 						    u32 min_start_block);
 
-/* Utxoset (replaces wallet utxoset table) */
-void bwatch_utxoset_add(struct command *cmd,
-		       const struct bitcoin_outpoint *outpoint,
-		       u32 blockheight, u32 txindex,
-		       const u8 *scriptpubkey, size_t scriptpubkey_len,
-		       struct amount_sat satoshis);
-void bwatch_utxoset_spend(struct command *cmd,
-			 const struct bitcoin_outpoint *outpoint,
-			 u32 spendheight);
-
-/* Transactions (replaces wallet transactions table) */
-void bwatch_transaction_add(struct command *cmd,
-			    const struct bitcoin_tx *tx,
-			    u32 blockheight, u32 txindex);
-
-/* Look up a stored transaction entry by txid. Returns the entry JSON token
- * (with blockheight + hex fields) into *buf_out, or NULL if not found. */
-const jsmntok_t *bwatch_get_transaction(const tal_t *ctx,
-					struct command *cmd,
-					const struct bitcoin_txid *txid,
-					const char **buf_out);
-
-/* Return all stored transaction entries as a tal-allocated array.
- * Mirrors wallet_transactions_get(); entries are allocated under ctx. */
-struct transaction_entry_wire **bwatch_get_all_transactions(const tal_t *ctx,
-							   struct command *cmd);
-
 #endif /* LIGHTNING_PLUGINS_BWATCH_BWATCH_STORE_H */

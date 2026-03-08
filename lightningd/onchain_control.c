@@ -542,9 +542,9 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 		  fmt_bitcoin_outpoint(tmpctx, &outpoint),
 		  csv_lock);
 
-	watchman_add_utxo(channel->peer->ld, &outpoint, blockheight, 0,
-			  scriptPubkey, tal_bytelen(scriptPubkey), amount,
-			  tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid));
+	watchman_watch_outpoint(channel->peer->ld,
+				tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid),
+				&outpoint, blockheight);
 
 	mvt = new_coin_wallet_deposit(msg, &outpoint, blockheight,
 			              amount, mk_mvt_tags(MVT_DEPOSIT));
@@ -1713,6 +1713,7 @@ void onchaind_funding_spent(struct channel *channel,
 			    u32 blockheight)
 {
 	u8 *msg;
+	struct bitcoin_txid funding_txid;
 	struct bitcoin_txid our_last_txid;
 	struct lightningd *ld = channel->peer->ld;
 	int hsmfd;
@@ -1736,6 +1737,7 @@ void onchaind_funding_spent(struct channel *channel,
 
 	tal_free(channel->close_blockheight);
 	channel->close_blockheight = tal_dup(channel, u32, &blockheight);
+	bitcoin_txid(tx, &funding_txid);
 
 	/* We could come from almost any state. */
 	/* NOTE(mschmoock) above comment is wrong, since we failed above! */
@@ -1744,6 +1746,9 @@ void onchaind_funding_spent(struct channel *channel,
 			  FUNDING_SPEND_SEEN,
 			  reason,
 			  tal_fmt(tmpctx, "Onchain funding spend"));
+
+	wallet_insert_funding_spend(ld->wallet, channel, &funding_txid, 0, blockheight);
+	wallet_transaction_add(ld->wallet, tx->wtx, blockheight, 0);
 
 	hsmfd = hsm_get_client_fd(ld, &channel->peer->id,
 				  channel->dbid,
@@ -1837,38 +1842,10 @@ void onchaind_funding_spent(struct channel *channel,
 				  feerate_min(ld, NULL));
 	subd_send_msg(channel->owner, take(msg));
 
-	/* Persist the spend so onchaind_restart_closed_channels can restart us if we
-	 * crash before reaching ONCHAIN state. */
-	{
-		struct bitcoin_txid txid;
-		bitcoin_txid(tx, &txid);
-		wallet_insert_funding_spend(ld->wallet, channel, &txid, 0, blockheight);
-	}
 
-	/* Init per-session tracking and register bwatch watches for the close
-	 * tx.  bwatch persists these so replay on restart is automatic. */
 	if (!channel->onchaind_watches)
 		channel->onchaind_watches = new_htable(channel, onchaind_tx_map);
 	bwatch_register_tx(channel, tx, blockheight);
-}
-
-struct onchaind_restart_ctx {
-	struct channel *channel;
-	u32 blockheight;
-};
-
-static void onchaind_restart_got_tx(struct bitcoin_tx *tx,
-				    u32 blockheight,
-				    void *arg)
-{
-	struct onchaind_restart_ctx *ctx = arg;
-
-	log_info(ctx->channel->log,
-		 "Restarting onchaind (%s): closed in block %u",
-		 channel_state_name(ctx->channel), blockheight);
-
-	onchaind_funding_spent(ctx->channel, tx, blockheight);
-	tal_free(ctx);
 }
 
 void onchaind_restart_closed_channels(struct lightningd *ld)
@@ -1879,33 +1856,28 @@ void onchaind_restart_closed_channels(struct lightningd *ld)
 	/* We don't hold a db tx for all of init */
 	db_begin_transaction(ld->wallet->db);
 
-	/* For each channel with a recorded funding spend, fetch the spending
-	 * tx from bwatch and restart onchaind to resume processing the close. */
 	for (peer = peer_node_id_map_first(ld->peers, &it);
 	     peer;
 	     peer = peer_node_id_map_next(ld->peers, &it)) {
 		struct channel *channel;
 
 		list_for_each(&peer->channels, channel, list) {
-			struct bitcoin_txid txid;
+			struct bitcoin_tx *tx;
 			u32 blockheight;
-			struct onchaind_restart_ctx *ctx;
 
 			if (channel_state_uncommitted(channel->state))
 				continue;
 
-			if (!wallet_get_funding_spend_txid(ld->wallet, channel->dbid,
-							   &txid, &blockheight))
+			tx = wallet_get_funding_spend(tmpctx, ld->wallet, channel->dbid,
+						      &blockheight);
+			if (!tx)
 				continue;
 
-			/* Fetch the raw spending tx from bwatch's store;
-			 * onchaind_restart_got_tx will start onchaind when it arrives. */
-			ctx = tal(channel, struct onchaind_restart_ctx);
-			ctx->channel = channel;
-			ctx->blockheight = blockheight;
+			log_info(channel->log,
+				 "Restarting onchaind (%s): closed in block %u",
+				 channel_state_name(channel), blockheight);
 
-			watchman_get_transaction(ld, &txid,
-						 onchaind_restart_got_tx, ctx);
+			onchaind_funding_spent(channel, tx, blockheight);
 		}
 	}
 	db_commit_transaction(ld->wallet->db);

@@ -7,7 +7,6 @@
 #include <ccan/mem/mem.h>
 #include <ccan/tal/str/str.h>
 #include <channeld/channeld_wiregen.h>
-#include <plugins/bwatch/bwatch_wiregen.h>
 #include <common/clock_time.h>
 #include <common/json_parse.h>
 #include <common/json_stream.h>
@@ -45,20 +44,6 @@
 /* 12 hours is usually enough reservation time */
 #define RESERVATION_INC (6 * 12)
 
-/* bwatch utxoset: spendheight == this means unspent */
-#define BWATCH_UTXOSET_UNSPENT UINT32_MAX
-
-/* Reservation datastore key prefix for bwatch UTXOs (not in outputs) */
-#define RESERVATION_NS "wallet"
-#define RESERVATION_SUB "reservations"
-
-static u32 reservation_get(struct wallet *w,
-			   const struct bitcoin_outpoint *outpoint);
-static void reservation_set(struct wallet *w,
-			    const struct bitcoin_outpoint *outpoint,
-			    u32 reserved_til);
-static void reservation_remove(struct wallet *w,
-			       const struct bitcoin_outpoint *outpoint);
 
 /* These go in db, so values cannot change (we can't put this into
  * lightningd/channel_state.h since it confuses cdump!) */
@@ -199,27 +184,38 @@ bool wallet_update_output_status(struct wallet *w,
 				 enum output_status oldstatus,
 				 enum output_status newstatus)
 {
-	/* No longer uses outputs table. Reservation state lives in datastore.
-	 * Spend state is tracked by bwatch for wallet UTXOs. */
+	struct db_stmt *stmt;
+	u32 new_reserved_til = 0;
+	bool set_reserved = false;
+
 	switch (newstatus) {
 	case OUTPUT_STATE_AVAILABLE:
 		if (oldstatus != OUTPUT_STATE_ANY && oldstatus != OUTPUT_STATE_RESERVED)
 			return false;
-		reservation_remove(w, outpoint);
-		return true;
+		break;
 	case OUTPUT_STATE_RESERVED:
 		if (oldstatus != OUTPUT_STATE_ANY && oldstatus != OUTPUT_STATE_AVAILABLE)
 			return false;
-		reservation_set(w, outpoint,
-			       get_block_height(w->ld) + RESERVATION_INC);
-		return true;
+		set_reserved = true;
+		new_reserved_til = get_block_height(w->ld) + RESERVATION_INC;
+		break;
 	case OUTPUT_STATE_SPENT:
-		reservation_remove(w, outpoint);
-		return true;
+		break;
 	case OUTPUT_STATE_ANY:
 		return false;
 	}
-	return false;
+
+	stmt = db_prepare_v2(w->db,
+		SQL("UPDATE our_outputs SET reserved_til = ? "
+		    "WHERE txid = ? AND outnum = ?;"));
+	if (set_reserved)
+		db_bind_int(stmt, new_reserved_til);
+	else
+		db_bind_null(stmt);
+	db_bind_txid(stmt, &outpoint->txid);
+	db_bind_int(stmt, outpoint->n);
+	db_exec_prepared_v2(take(stmt));
+	return true;
 }
 
 static int cmp_utxo(struct utxo *const *a,
@@ -237,157 +233,117 @@ static int cmp_utxo(struct utxo *const *a,
 	return 0;
 }
 
-/* Reservation datastore for bwatch UTXOs (not in outputs table) */
-static const char **reservation_key(const tal_t *ctx,
-				    const struct bitcoin_outpoint *outpoint)
-{
-	return mkdatastorekey(ctx, RESERVATION_NS, RESERVATION_SUB,
-			     fmt_bitcoin_txid(ctx, &outpoint->txid),
-			     tal_fmt(ctx, "%u", outpoint->n));
-}
-
-static u32 reservation_get(struct wallet *w,
-			   const struct bitcoin_outpoint *outpoint)
-{
-	const char **key = reservation_key(tmpctx, outpoint);
-	u8 *data = wallet_datastore_get(tmpctx, w, key, NULL);
-	u32 reserved_til = 0;
-
-	if (data && tal_bytelen(data) >= sizeof(u32)) {
-		size_t len = tal_bytelen(data);
-		const u8 *cursor = data;
-		reserved_til = fromwire_u32(&cursor, &len);
-	}
-	return reserved_til;
-}
-
-static void reservation_set(struct wallet *w,
-			    const struct bitcoin_outpoint *outpoint,
-			    u32 reserved_til)
-{
-	const char **key = reservation_key(tmpctx, outpoint);
-	u8 *data = tal_arr(tmpctx, u8, 0);
-
-	towire_u32(&data, reserved_til);
-	if (wallet_datastore_get(tmpctx, w, key, NULL))
-		wallet_datastore_update(w, key, data);
-	else
-		wallet_datastore_create(w, key, data);
-}
-
-static void reservation_remove(struct wallet *w,
-			       const struct bitcoin_outpoint *outpoint)
-{
-	const char **key = reservation_key(tmpctx, outpoint);
-
-	wallet_datastore_remove(w, key);
-}
-
-/* Convert a utxoset entry (from bwatch's datastore) to struct utxo.
- * Returns NULL if we can't spend (e.g. channel output not in our wallet keys). */
-static struct utxo *utxoset_entry_to_utxo(const tal_t *ctx, struct wallet *w,
-					 const struct utxoset_entry_wire *entry,
-					 bool include_spent)
+/* Convert an our_outputs row to struct utxo.
+ *
+ * Returns NULL if the scriptpubkey doesn't belong to our HD wallet (e.g. a
+ * channel output we watch for spend notification but cannot spend ourselves),
+ * or if the script type is one we don't know how to sign for. */
+static struct utxo *our_output_row_to_utxo(const tal_t *ctx,
+					      struct wallet *w,
+					      struct db_stmt *stmt)
 {
 	struct utxo *utxo;
 	u32 keyindex;
-	enum addrtype addrtype;
+	const u8 *scriptpubkey = db_col_arr(tmpctx, stmt, "scriptpubkey", u8);
+	size_t script_len = tal_bytelen(scriptpubkey);
 
-	if (entry->spendheight != BWATCH_UTXOSET_UNSPENT && !include_spent)
+	/* our_outputs only contains wallet-owned outputs; all rows have keyindex.
+	 * NULL is a safety net against backfill edge cases or corruption. */
+	if (db_col_is_null(stmt, "keyindex"))
 		return NULL;
-
-	if (!wallet_can_spend(w, entry->scriptpubkey, tal_count(entry->scriptpubkey),
-			     &keyindex, &addrtype))
-		return NULL; /* Channel output, not our wallet */
+	keyindex = db_col_int(stmt, "keyindex");
 
 	utxo = tal(ctx, struct utxo);
-	utxo->outpoint.txid = entry->txid;
-	utxo->outpoint.n = entry->outnum;
-	utxo->amount = entry->satoshis;
+	db_col_txid(stmt, "txid", &utxo->outpoint.txid);
+	utxo->outpoint.n = db_col_int(stmt, "outnum");
+	utxo->amount = db_col_amount_sat(stmt, "satoshis");
 	utxo->keyindex = keyindex;
 	utxo->close_info = NULL;
 	utxo->is_in_coinbase = false;
-	utxo->scriptPubkey = tal_dup_arr(utxo, u8, entry->scriptpubkey,
-					 tal_count(entry->scriptpubkey), 0);
+	utxo->scriptPubkey = tal_dup_arr(utxo, u8, scriptpubkey, script_len, 0);
 
-	if (entry->spendheight != BWATCH_UTXOSET_UNSPENT) {
-		utxo->status = OUTPUT_STATE_SPENT;
-		u32 *bh = tal(utxo, u32);
-		*bh = entry->blockheight;
-		utxo->blockheight = bh;
+	u32 *bh = tal(utxo, u32);
+	*bh = db_col_int(stmt, "blockheight");
+	utxo->blockheight = bh;
+
+	/* Always consume reserved_til to satisfy the "all columns read" check,
+	 * even in the spent branch where we don't need its value. */
+	utxo->reserved_til = db_col_is_null(stmt, "reserved_til")
+		? 0 : db_col_int(stmt, "reserved_til");
+
+	/* spendheight being set means a spending tx has been confirmed.
+	 * Otherwise, reserved_til (if non-zero) means the output is
+	 * temporarily locked for an in-progress spend attempt. */
+	if (!db_col_is_null(stmt, "spendheight")) {
 		u32 *sh = tal(utxo, u32);
-		*sh = entry->spendheight;
+		*sh = db_col_int(stmt, "spendheight");
 		utxo->spendheight = sh;
+		utxo->status = OUTPUT_STATE_SPENT;
 		utxo->reserved_til = 0;
 	} else {
-		utxo->reserved_til = reservation_get(w, &utxo->outpoint);
-		utxo->status = utxo->reserved_til ? OUTPUT_STATE_RESERVED
-						  : OUTPUT_STATE_AVAILABLE;
-		if (entry->blockheight) {
-			u32 *bh = tal(utxo, u32);
-			*bh = entry->blockheight;
-			utxo->blockheight = bh;
-		} else {
-			utxo->blockheight = NULL;
-		}
 		utxo->spendheight = NULL;
+		utxo->status = utxo->reserved_til
+			? OUTPUT_STATE_RESERVED : OUTPUT_STATE_AVAILABLE;
 	}
 
-	/* Derive utxotype from scriptpubkey */
-	if (is_p2wpkh(utxo->scriptPubkey, tal_bytelen(utxo->scriptPubkey), NULL))
+	if (is_p2wpkh(utxo->scriptPubkey, script_len, NULL))
 		utxo->utxotype = UTXO_P2WPKH;
-	else if (is_p2tr(utxo->scriptPubkey, tal_bytelen(utxo->scriptPubkey), NULL))
+	else if (is_p2tr(utxo->scriptPubkey, script_len, NULL))
 		utxo->utxotype = UTXO_P2TR;
-	else if (is_p2sh(utxo->scriptPubkey, tal_bytelen(utxo->scriptPubkey), NULL))
+	else if (is_p2sh(utxo->scriptPubkey, script_len, NULL))
 		utxo->utxotype = UTXO_P2SH_P2WPKH;
 	else
-		return tal_free(utxo); /* Unknown type, skip */
+		return tal_free(utxo);
 
 	return utxo;
 }
 
-/* Gather UTXOs from bwatch's datastore (wallet keys only).
- * @include_spent: if true, include spent outputs; if false, only unspent. */
-static struct utxo **utxoset_get_utxos(const tal_t *ctx, struct wallet *w,
-				       bool include_spent)
+void wallet_add_our_output(struct wallet *w,
+			   const struct bitcoin_outpoint *outpoint,
+			   u32 blockheight, u32 txindex,
+			   const u8 *script, size_t script_len,
+			   struct amount_sat sat,
+			   u32 keyindex)
 {
-	const char **startkey = mkdatastorekey(tmpctx, "bwatch", "utxoset");
-	struct utxo **results = tal_arr(ctx, struct utxo *, 0);
 	struct db_stmt *stmt;
-	const char **key;
-	const u8 *data;
-	u64 generation;
-	struct utxoset_entry_wire *entry;
 
-	for (stmt = wallet_datastore_first(tmpctx, w, startkey, &key, &data, &generation);
-	     stmt;
-	     stmt = wallet_datastore_next(tmpctx, startkey, stmt, &key, &data, &generation)) {
-		if (tal_count(key) < 4)
-			continue;
-
-		if (!fromwire_bwatch_utxoset_entry(tmpctx, data, &entry))
-			continue;
-
-		struct utxo *u = utxoset_entry_to_utxo(results, w, entry, include_spent);
-		if (u)
-			tal_arr_expand(&results, u);
-	}
-
-	if (randbytes_overridden())
-		asort(results, tal_count(results), cmp_utxo, NULL);
-	return results;
+	stmt = db_prepare_v2(w->db,
+		SQL("INSERT OR IGNORE INTO our_outputs "
+		    "(txid, outnum, blockheight, txindex, scriptpubkey, satoshis, keyindex) "
+		    "VALUES (?, ?, ?, ?, ?, ?, ?);"));
+	db_bind_txid(stmt, &outpoint->txid);
+	db_bind_int(stmt, outpoint->n);
+	db_bind_int(stmt, blockheight);
+	db_bind_int(stmt, txindex);
+	db_bind_blob(stmt, script, script_len);
+	db_bind_amount_sat(stmt, sat);
+	db_bind_int(stmt, keyindex);
+	db_exec_prepared_v2(take(stmt));
 }
 
 struct utxo **wallet_get_all_utxos(const tal_t *ctx, struct wallet *w)
 {
-	/* All UTXOs (wallet + channel) are in the bwatch utxoset datastore. */
-	return utxoset_get_utxos(ctx, w, true /* include_spent */);
-}
+	struct utxo **results = tal_arr(ctx, struct utxo *, 0);
+	struct db_stmt *stmt;
 
-static struct utxo **db_get_unspent_utxos(const tal_t *ctx, struct wallet *w)
-{
-	/* All UTXOs (wallet + channel) are in the bwatch utxoset datastore. */
-	return utxoset_get_utxos(ctx, w, false /* unspent only */);
+	/* Fetch every output we own: available, reserved, and spent. */
+	stmt = db_prepare_v2(w->db,
+		SQL("SELECT txid, outnum, blockheight, scriptpubkey, "
+		    "       satoshis, spendheight, reserved_til, keyindex "
+		    "FROM our_outputs;"));
+	db_query_prepared(stmt);
+
+	while (db_step(stmt)) {
+		struct utxo *u = our_output_row_to_utxo(results, w, stmt);
+		if (u)
+			tal_arr_expand(&results, u);
+	}
+	tal_free(stmt);
+
+	/* Randomize order when testing so coin selection isn't deterministic. */
+	if (randbytes_overridden())
+		asort(results, tal_count(results), cmp_utxo, NULL);
+	return results;
 }
 
 /**
@@ -400,28 +356,50 @@ static struct utxo **db_get_unspent_utxos(const tal_t *ctx, struct wallet *w)
  */
 struct utxo **wallet_get_unspent_utxos(const tal_t *ctx, struct wallet *w)
 {
-	return db_get_unspent_utxos(ctx, w);
+	struct utxo **results = tal_arr(ctx, struct utxo *, 0);
+	struct db_stmt *stmt;
+
+	/* Fetch outputs not yet spent. Includes both available and reserved;
+	 * spendheight NULL = unspent. Use utxo_is_reserved() to distinguish. */
+	stmt = db_prepare_v2(w->db,
+		SQL("SELECT txid, outnum, blockheight, scriptpubkey, "
+		    "       satoshis, spendheight, reserved_til, keyindex "
+		    "FROM our_outputs "
+		    "WHERE spendheight IS NULL;"));
+	db_query_prepared(stmt);
+
+	while (db_step(stmt)) {
+		struct utxo *u = our_output_row_to_utxo(results, w, stmt);
+		if (u)
+			tal_arr_expand(&results, u);
+	}
+	tal_free(stmt);
+
+	/* Randomize order when testing so coin selection isn't deterministic. */
+	if (randbytes_overridden())
+		asort(results, tal_count(results), cmp_utxo, NULL);
+	return results;
 }
 
 struct utxo *wallet_utxo_get(const tal_t *ctx, struct wallet *w,
 			     const struct bitcoin_outpoint *outpoint)
 {
-	const char **key;
-	u8 *data;
-	struct utxoset_entry_wire *entry;
-	struct utxo *utxo;
+	struct db_stmt *stmt;
+	struct utxo *utxo = NULL;
 
-	/* All UTXOs (wallet + channel) are in the bwatch utxoset datastore. */
-	key = mkdatastorekey(tmpctx, "bwatch", "utxoset",
-			     fmt_bitcoin_txid(tmpctx, &outpoint->txid),
-			     tal_fmt(tmpctx, "%u", outpoint->n));
-	data = wallet_datastore_get(tmpctx, w, key, NULL);
-	if (data && fromwire_bwatch_utxoset_entry(tmpctx, data, &entry)) {
-		utxo = utxoset_entry_to_utxo(ctx, w, entry, true);
-		if (utxo)
-			return utxo;
-	}
-	return NULL;
+	stmt = db_prepare_v2(w->db,
+		SQL("SELECT txid, outnum, blockheight, scriptpubkey, "
+		    "       satoshis, spendheight, reserved_til, keyindex "
+		    "FROM our_outputs "
+		    "WHERE txid = ? AND outnum = ?;"));
+	db_bind_txid(stmt, &outpoint->txid);
+	db_bind_int(stmt, outpoint->n);
+	db_query_prepared(stmt);
+
+	if (db_step(stmt))
+		utxo = our_output_row_to_utxo(ctx, w, stmt);
+	tal_free(stmt);
+	return utxo;
 }
 
 static u32 calc_feerate(struct amount_sat excess_sats,
@@ -514,6 +492,8 @@ bool wallet_reserve_utxo(struct wallet *w, struct utxo *utxo,
 			 u32 current_height,
 			 u32 reserve)
 {
+	struct db_stmt *stmt;
+
 	switch (utxo->status) {
 	case OUTPUT_STATE_SPENT:
 		return false;
@@ -532,8 +512,13 @@ bool wallet_reserve_utxo(struct wallet *w, struct utxo *utxo,
 
 	utxo->status = OUTPUT_STATE_RESERVED;
 
-	/* All UTXOs use reservation datastore (no outputs table) */
-	reservation_set(w, &utxo->outpoint, utxo->reserved_til);
+	stmt = db_prepare_v2(w->db,
+		SQL("UPDATE our_outputs SET reserved_til = ? "
+		    "WHERE txid = ? AND outnum = ?;"));
+	db_bind_int(stmt, utxo->reserved_til);
+	db_bind_txid(stmt, &utxo->outpoint.txid);
+	db_bind_int(stmt, utxo->outpoint.n);
+	db_exec_prepared_v2(take(stmt));
 
 	return true;
 }
@@ -542,6 +527,8 @@ void wallet_unreserve_utxo(struct wallet *w, struct utxo *utxo,
 			   u32 current_height,
 			   u32 unreserve)
 {
+	struct db_stmt *stmt;
+
 	if (utxo->status != OUTPUT_STATE_RESERVED)
 		fatal("UTXO %s is not reserved",
 		      fmt_bitcoin_outpoint(tmpctx,
@@ -553,10 +540,16 @@ void wallet_unreserve_utxo(struct wallet *w, struct utxo *utxo,
 	} else
 		utxo->reserved_til -= unreserve;
 
+	stmt = db_prepare_v2(w->db,
+		SQL("UPDATE our_outputs SET reserved_til = ? "
+		    "WHERE txid = ? AND outnum = ?;"));
 	if (utxo->reserved_til)
-		reservation_set(w, &utxo->outpoint, utxo->reserved_til);
+		db_bind_int(stmt, utxo->reserved_til);
 	else
-		reservation_remove(w, &utxo->outpoint);
+		db_bind_null(stmt);
+	db_bind_txid(stmt, &utxo->outpoint.txid);
+	db_bind_int(stmt, utxo->outpoint.n);
+	db_exec_prepared_v2(take(stmt));
 }
 
 static bool excluded(const struct utxo **excludes,
@@ -612,7 +605,7 @@ struct utxo *wallet_find_utxo(const tal_t *ctx, struct wallet *w,
 			      bool nonwrapped,
 			      const struct utxo **excludes)
 {
-	struct utxo **utxos = db_get_unspent_utxos(ctx, w);
+	struct utxo **utxos = wallet_get_unspent_utxos(ctx, w);
 	struct utxo *utxo = NULL;
 	size_t i, n = tal_count(utxos);
 
@@ -645,7 +638,7 @@ bool wallet_has_funds(struct wallet *w,
 		      u32 current_blockheight,
 		      struct amount_sat *needed)
 {
-	struct utxo **utxos = db_get_unspent_utxos(tmpctx, w);
+	struct utxo **utxos = wallet_get_unspent_utxos(tmpctx, w);
 	size_t i, n = tal_count(utxos);
 
 	for (i = 0; i < n; i++) {
@@ -670,68 +663,61 @@ bool wallet_has_funds(struct wallet *w,
 	return false;
 }
 
-/* Parse owner string "wallet/<type>/<keyindex>" into keyidx and addrtype */
-static bool parse_wallet_owner(const char *owner, u32 *keyidx,
-			       enum addrtype *addrtype)
+bool wallet_scriptpubkey_to_keyidx(struct lightningd *ld, struct db *db,
+				   const u8 *script, size_t script_len,
+				   u32 *index, enum addrtype *addrtype)
 {
-	const char *slash, *type_start, *idx_start;
-	char *end;
-	unsigned long val;
+	/* How far we've derived so far; scan up to this index. */
+	u64 max_keyidx = db_get_intvar(db,
+				       ld->bip86_base
+				       ? "bip86_max_index" : "bip32_max_index",
+				       0);
 
-	if (!strstarts(owner, "wallet/"))
-		return false;
+	for (u64 keyidx = 0; keyidx <= max_keyidx; keyidx++) {
+		struct pubkey pubkey;
+		const u8 *p2wpkh, *p2tr, *p2sh;
 
-	type_start = owner + strlen("wallet/");
-	slash = strchr(type_start, '/');
-	if (!slash)
-		return false;
+		/* Derive pubkey for this index (BIP86 taproot or BIP32 legacy). */
+		if (ld->bip86_base)
+			bip86_pubkey(ld, &pubkey, (u32)keyidx);
+		else
+			bip32_pubkey(ld, &pubkey, (u32)keyidx);
 
-	idx_start = slash + 1;
-	val = strtoul(idx_start, &end, 10);
-	if (end == idx_start || *end != '\0')
-		return false;
-	*keyidx = (u32)val;
+		/* Check P2WPKH (native segwit, bc1...). */
+		p2wpkh = scriptpubkey_p2wpkh(tmpctx, &pubkey);
+		if (tal_bytelen(p2wpkh) == script_len &&
+		    memcmp(p2wpkh, script, script_len) == 0) {
+			if (index) *index = (u32)keyidx;
+			if (addrtype) *addrtype = ADDR_BECH32;
+			return true;
+		}
 
-	if (strstarts(type_start, "p2wpkh/")) {
-		if (addrtype)
-			*addrtype = ADDR_BECH32;
-	} else if (strstarts(type_start, "p2tr/")) {
-		if (addrtype)
-			*addrtype = ADDR_P2TR;
-	} else if (strstarts(type_start, "p2sh_p2wpkh/")) {
-		if (addrtype)
-			*addrtype = ADDR_P2SH_SEGWIT;
-	} else {
-		return false;
+		p2tr = scriptpubkey_p2tr(tmpctx, &pubkey);
+		if (tal_bytelen(p2tr) == script_len &&
+		    memcmp(p2tr, script, script_len) == 0) {
+			if (index) *index = (u32)keyidx;
+			if (addrtype) *addrtype = ADDR_P2TR;
+			return true;
+		}
+
+		p2sh = scriptpubkey_p2sh(tmpctx, p2wpkh);
+		if (tal_bytelen(p2sh) == script_len &&
+		    memcmp(p2sh, script, script_len) == 0) {
+			if (index) *index = (u32)keyidx;
+			if (addrtype) *addrtype = ADDR_P2SH_SEGWIT;
+			return true;
+		}
 	}
 
-	return true;
+	return false;
 }
 
 bool wallet_can_spend(struct wallet *w, const u8 *script, size_t script_len,
 		      u32 *index, enum addrtype *addrtype)
 {
-	const char *owner;
-
-	owner = watchman_lookup_scriptpubkey(w->ld, script, script_len);
-	if (!owner)
-		return false;
-
-	if (!parse_wallet_owner(owner, index, addrtype))
-		return false;
-
-	/* Bump max index if we found a key beyond current max */
-	if (w->ld->bip86_base) {
-		u64 bip86_max_index = db_get_intvar(w->db, "bip86_max_index", 0);
-		if (*index > bip86_max_index)
-			db_set_intvar(w->db, "bip86_max_index", *index);
-	} else {
-		u64 bip32_max_index = db_get_intvar(w->db, "bip32_max_index", 0);
-		if (*index > bip32_max_index)
-			db_set_intvar(w->db, "bip32_max_index", *index);
-	}
-
-	return true;
+	return wallet_scriptpubkey_to_keyidx(w->ld, w->db,
+					     script, script_len,
+					     index, addrtype);
 }
 
 s64 wallet_get_newindex(struct lightningd *ld, enum addrtype addrtype)
@@ -2747,8 +2733,14 @@ void wallet_channel_close(struct wallet *w,
 	db_bind_u64(stmt, chan->dbid);
 	db_exec_prepared_v2(take(stmt));
 
-	/* Delete entries from `htlc_sigs` */
+	/* Delete entries from legacy channeltxs. */
 	stmt = db_prepare_v2(w->db, SQL("DELETE FROM channeltxs "
+					"WHERE channel_id=?"));
+	db_bind_u64(stmt, chan->dbid);
+	db_exec_prepared_v2(take(stmt));
+
+	/* Delete entries from our onchaind restart table. */
+	stmt = db_prepare_v2(w->db, SQL("DELETE FROM our_channel_txs "
 					"WHERE channel_id=?"));
 	db_bind_u64(stmt, chan->dbid);
 	db_exec_prepared_v2(take(stmt));
@@ -2897,6 +2889,7 @@ static void got_utxo(struct wallet *w,
 		     size_t outnum,
 		     bool is_coinbase,
 		     const u32 *blockheight,
+		     u32 txindex,
 		     struct bitcoin_outpoint *outpoint)
 {
 	struct utxo *utxo = tal(tmpctx, struct utxo);
@@ -2951,18 +2944,19 @@ type_ok:
 		wallet_save_chain_mvt(w->ld, mvt);
 	}
 
-	/* Add to bwatch's datastore (replaces outputs table). blockheight 0 = unconfirmed.
-	 * TODO: txindex is always 0 here - wallet_extract_owned_outputs and rescan don't
-	 * have block tx order. Bwatch will overwrite with correct txindex when it sees
-	 * the tx in a block (scriptpubkey match).
-	 * owner: so bwatch notifies us when this wallet output is spent. */
-	watchman_add_utxo(w->ld, &utxo->outpoint,
-			  blockheight ? *blockheight : 0,
-			  0, /* txindex: not available at this callsite */
-			  utxo->scriptPubkey, tal_bytelen(utxo->scriptPubkey),
-			  utxo->amount,
-			  tal_fmt(tmpctx, "wallet/utxo/%s",
-				  fmt_bitcoin_outpoint(tmpctx, &utxo->outpoint)));
+	/* Insert into our_outputs and register outpoint watch so bwatch
+	 * notifies us (via wallet/utxo/<outpoint>) when this output is spent. */
+	wallet_add_our_output(w, &utxo->outpoint,
+			      blockheight ? *blockheight : 0,
+			      txindex,
+			      utxo->scriptPubkey, tal_bytelen(utxo->scriptPubkey),
+			      utxo->amount,
+			      utxo->keyindex);
+	watchman_watch_outpoint(w->ld,
+				tal_fmt(tmpctx, "wallet/utxo/%s",
+					fmt_bitcoin_outpoint(tmpctx, &utxo->outpoint)),
+				&utxo->outpoint,
+				blockheight ? *blockheight : 0);
 
 	/* This is an unconfirmed change output, we should track it */
 	if (utxo->utxotype != UTXO_P2SH_P2WPKH && !blockheight) {
@@ -2997,7 +2991,7 @@ int wallet_extract_owned_outputs(struct wallet *w, const struct wally_tx *wtx,
 		if (!wallet_can_spend(w, txout->script, txout->script_len, &keyindex, &addrtype))
 			continue;
 
-		got_utxo(w, keyindex, addrtype, wtx, i, is_coinbase, blockheight, NULL);
+		got_utxo(w, keyindex, addrtype, wtx, i, is_coinbase, blockheight, 0, NULL);
 		num_utxos++;
 	}
 	return num_utxos;
@@ -3044,9 +3038,12 @@ static void wallet_watch_scriptpubkey_common(struct lightningd *ld,
 	
 	invoice_check_onchain_payment(ld, txout->script, amount, &outpoint);
 
-	/* Store the output and register spend watch so bwatch notifies when spent */
+	/* Keep confirmed wallet-relevant transactions in lightningd's SQL store. */
+	wallet_transaction_add(w, tx->wtx, blockheight, txindex);
+
+	/* Store output in our_outputs and register spend watch. */
 	got_utxo(w, keyindex, addrtype, tx->wtx, outnum, is_coinbase,
-		 &blockheight, &outpoint);
+		 &blockheight, txindex, &outpoint);
 
 	log_debug(w->log, "Wallet watch found: keyindex=%u, addrtype=%d, amount=%s, blockheight=%u%s",
 		  keyindex, addrtype, fmt_amount_sat(tmpctx, amount), blockheight,
@@ -4564,6 +4561,7 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 				   u32 txindex UNUSED)
 {
 	struct bitcoin_outpoint outpoint;
+	struct db_stmt *stmt;
 	jsmntok_t tok;
 	struct bitcoin_txid spending_txid;
 
@@ -4576,6 +4574,16 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 	}
 
 	bitcoin_txid(tx, &spending_txid);
+
+	/* Mark the output spent in our_outputs. */
+	stmt = db_prepare_v2(ld->wallet->db,
+		SQL("UPDATE our_outputs SET spendheight = ? "
+		    "WHERE txid = ? AND outnum = ?;"));
+	db_bind_int(stmt, blockheight);
+	db_bind_txid(stmt, &outpoint.txid);
+	db_bind_int(stmt, outpoint.n);
+	db_exec_prepared_v2(take(stmt));
+
 	wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
 }
 
@@ -4615,12 +4623,30 @@ void wallet_annotate_txin(struct wallet *w, const struct bitcoin_txid *txid,
 	wallet_annotation_add(w, txid, innum, INPUT_ANNOTATION, type, channel);
 }
 
+void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
+			    u32 blockheight, u32 txindex)
+{
+	struct db_stmt *stmt;
+	struct bitcoin_txid txid;
+
+	wally_txid(tx, &txid);
+
+	stmt = db_prepare_v2(w->db,
+			     SQL("INSERT OR REPLACE INTO our_txs "
+				 "(txid, blockheight, txindex, rawtx) VALUES (?, ?, ?, ?);"));
+	db_bind_txid(stmt, &txid);
+	db_bind_int(stmt, blockheight);
+	db_bind_int(stmt, txindex);
+	db_bind_talarr(stmt, linearize_wtx(tmpctx, tx));
+	db_exec_prepared_v2(take(stmt));
+}
+
 struct bitcoin_tx *wallet_transaction_get(const tal_t *ctx, struct wallet *w,
 					  const struct bitcoin_txid *txid)
 {
 	struct bitcoin_tx *tx;
 	struct db_stmt *stmt = db_prepare_v2(
-	    w->db, SQL("SELECT rawtx FROM transactions WHERE id=?"));
+	    w->db, SQL("SELECT rawtx FROM our_txs WHERE txid=?"));
 	db_bind_txid(stmt, txid);
 	db_query_prepared(stmt);
 
@@ -4642,7 +4668,7 @@ u32 wallet_transaction_height(struct wallet *w, const struct bitcoin_txid *txid)
 {
 	u32 blockheight;
 	struct db_stmt *stmt = db_prepare_v2(
-	    w->db, SQL("SELECT blockheight FROM transactions WHERE id=?"));
+	    w->db, SQL("SELECT blockheight FROM our_txs WHERE txid=?"));
 	db_bind_txid(stmt, txid);
 	db_query_prepared(stmt);
 
@@ -4666,7 +4692,7 @@ struct txlocator *wallet_transaction_locate(const tal_t *ctx, struct wallet *w,
 	struct db_stmt *stmt;
 
 	stmt = db_prepare_v2(
-		w->db, SQL("SELECT blockheight, txindex FROM transactions WHERE id=?"));
+		w->db, SQL("SELECT blockheight, txindex FROM our_txs WHERE txid=?"));
 	db_bind_txid(stmt, txid);
 	db_query_prepared(stmt);
 
@@ -4675,8 +4701,10 @@ struct txlocator *wallet_transaction_locate(const tal_t *ctx, struct wallet *w,
 		return NULL;
 	}
 
-	if (db_col_is_null(stmt, "blockheight")) {
-		db_col_ignore(stmt, "txindex");
+	if (db_col_int(stmt, "blockheight") == 0
+	    || db_col_is_null(stmt, "txindex")) {
+		if (db_col_is_null(stmt, "txindex"))
+			db_col_ignore(stmt, "txindex");
 		loc = NULL;
 	} else {
 		loc = tal(ctx, struct txlocator);
@@ -4695,13 +4723,12 @@ struct bitcoin_txid *wallet_transactions_by_height(const tal_t *ctx,
 	struct bitcoin_txid *txids = tal_arr(ctx, struct bitcoin_txid, 0);
 	int count = 0;
 
-	/* Note: blockheight=NULL is not the same as is NULL! */
 	if (blockheight == 0) {
 		stmt = db_prepare_v2(
-			w->db, SQL("SELECT id FROM transactions WHERE blockheight IS NULL"));
+			w->db, SQL("SELECT txid FROM our_txs WHERE blockheight = 0"));
 	} else {
 		stmt = db_prepare_v2(
-			w->db, SQL("SELECT id FROM transactions WHERE blockheight=?"));
+			w->db, SQL("SELECT txid FROM our_txs WHERE blockheight=?"));
 		db_bind_int(stmt, blockheight);
 	}
 	db_query_prepared(stmt);
@@ -4709,7 +4736,7 @@ struct bitcoin_txid *wallet_transactions_by_height(const tal_t *ctx,
 	while (db_step(stmt)) {
 		count++;
 		tal_resize(&txids, count);
-		db_col_txid(stmt, "id", &txids[count-1]);
+		db_col_txid(stmt, "txid", &txids[count-1]);
 	}
 	tal_free(stmt);
 
@@ -4722,48 +4749,51 @@ void wallet_insert_funding_spend(struct wallet *w,
 				 const u32 input_num, const u32 blockheight)
 {
 	struct db_stmt *stmt;
-	stmt = db_prepare_v2(w->db, SQL("INSERT INTO channeltxs ("
+
+	stmt = db_prepare_v2(w->db, SQL("INSERT INTO our_channel_txs ("
 					"  channel_id"
 					", type"
 					", transaction_id"
 					", input_num"
 					", blockheight"
 					") VALUES (?, ?, ?, ?, ?);"));
-	db_bind_int(stmt, chan->dbid);
+	db_bind_u64(stmt, chan->dbid);
 	/* FIXME: This is WIRE_ONCHAIND_INIT, accidentally leaked into db! */
 	db_bind_int(stmt, 5001);
 	db_bind_txid(stmt, txid);
 	db_bind_int(stmt, input_num);
 	db_bind_int(stmt, blockheight);
-
 	db_exec_prepared_v2(take(stmt));
 }
 
-bool wallet_get_funding_spend_txid(struct wallet *w,
-				   u64 channel_id,
-				   struct bitcoin_txid *txid,
-				   u32 *blockheight)
+struct bitcoin_tx *wallet_get_funding_spend(const tal_t *ctx,
+					    struct wallet *w,
+					    u64 channel_id,
+					    u32 *blockheight)
 {
 	struct db_stmt *stmt;
+	struct bitcoin_tx *tx;
 
 	stmt = db_prepare_v2(w->db,
-			     SQL("SELECT transaction_id, blockheight"
-				 " FROM channeltxs"
-				 " WHERE channel_id = ? AND type = ?"
-				 " ORDER BY id ASC;"));
-	db_bind_int(stmt, channel_id);
+			     SQL("SELECT"
+				 " t.blockheight"
+				 ", t.rawtx"
+				 " FROM our_channel_txs c"
+				 " JOIN our_txs t ON t.txid = c.transaction_id"
+				 " WHERE c.channel_id = ? AND c.type = ?"
+				 " ORDER BY c.id ASC;"));
+	db_bind_u64(stmt, channel_id);
 	db_bind_int(stmt, WIRE_ONCHAIND_INIT);
 	db_query_prepared(stmt);
 
-	if (!db_step(stmt)) {
-		tal_free(stmt);
-		return false;
-	}
-
-	db_col_txid(stmt, "transaction_id", txid);
-	*blockheight = db_col_int(stmt, "blockheight");
+	if (db_step(stmt)) {
+		tx = db_col_tx(ctx, stmt, "t.rawtx");
+		*blockheight = db_col_int(stmt, "t.blockheight");
+	} else
+		tx = NULL;
 	tal_free(stmt);
-	return true;
+
+	return tx;
 }
 
 static bool wallet_forwarded_payment_update(struct wallet *w,
@@ -5292,13 +5322,11 @@ struct wallet_transaction *wallet_transactions_get(const tal_t *ctx, struct wall
 	stmt = db_prepare_v2(
 	    w->db,
 	    SQL("SELECT"
-		"  t.id"
+		"  t.txid"
 		", t.rawtx"
 		", t.blockheight"
 		", t.txindex"
-		" FROM"
-		"  transactions t LEFT JOIN"
-		"  channels c ON (t.channel_id = c.id) "
+		" FROM our_txs t "
 		"ORDER BY t.blockheight, t.txindex ASC"));
 	db_query_prepared(stmt);
 
@@ -5307,10 +5335,10 @@ struct wallet_transaction *wallet_transactions_get(const tal_t *ctx, struct wall
 
 		tal_resize(&txs, tal_count(txs) + 1);
 		cur = &txs[tal_count(txs) - 1];
-		db_col_txid(stmt, "t.id", &cur->id);
+		db_col_txid(stmt, "t.txid", &cur->id);
 		cur->tx = db_col_tx(txs, stmt, "t.rawtx");
 		cur->rawtx = db_col_arr(txs, stmt, "t.rawtx", u8);
-		if (!db_col_is_null(stmt, "t.blockheight")) {
+		if (db_col_int(stmt, "t.blockheight") != 0) {
 			cur->blockheight = db_col_int(stmt, "t.blockheight");
 			if (!db_col_is_null(stmt, "t.txindex")) {
 				cur->txindex = db_col_int(stmt, "t.txindex");
@@ -5318,7 +5346,6 @@ struct wallet_transaction *wallet_transactions_get(const tal_t *ctx, struct wall
 				cur->txindex = 0;
 			}
 		} else {
-			db_col_ignore(stmt, "t.txindex");
 			cur->blockheight = 0;
 			cur->txindex = 0;
 		}
@@ -6977,7 +7004,7 @@ static void mutual_close_p2pkh_catch(struct bitcoind *bitcoind,
 					   tal_bytelen(missing->addrs[n].scriptpubkey)))
 					continue;
 				got_utxo(w, missing->addrs[n].keyidx, ADDR_BECH32,
-					 wtx, outnum, i == 0, &height, &outp);
+					 wtx, outnum, i == 0, &height, 0, &outp);
 				log_broken(bitcoind->ld->log, "Rescan found %s!",
 					   fmt_bitcoin_outpoint(tmpctx, &outp));
 				missing->num_found++;
@@ -7098,8 +7125,31 @@ void wallet_begin_old_close_rescan(struct lightningd *ld)
 void migrate_setup_coinmoves(struct lightningd *ld, struct db *db)
 {
 	/* ld->wallet and wallet->db are set before db_migrate (see wallet_new/db_setup). */
-	struct utxo **utxos = db_get_unspent_utxos(tmpctx, ld->wallet);
+	/* This migration runs at v25.09, before our_outputs exists (v26.04).
+	 * Read confirmed, unspent wallet-owned UTXOs from the legacy outputs table. */
+	struct utxo **utxos = tal_arr(tmpctx, struct utxo *, 0);
 	struct db_stmt *stmt;
+
+	stmt = db_prepare_v2(db,
+		SQL("SELECT prev_out_tx, prev_out_index, value,"
+		    "       confirmation_height"
+		    " FROM outputs"
+		    " WHERE status != 2"	/* not spent */
+		    "   AND confirmation_height IS NOT NULL"
+		    "   AND spend_height IS NULL;"));
+	db_query_prepared(stmt);
+	while (db_step(stmt)) {
+		struct utxo *u = tal(utxos, struct utxo);
+		db_col_txid(stmt, "prev_out_tx", &u->outpoint.txid);
+		u->outpoint.n = db_col_int(stmt, "prev_out_index");
+		u->amount = db_col_amount_sat(stmt, "value");
+		u32 *bh = tal(u, u32);
+		*bh = db_col_int(stmt, "confirmation_height");
+		u->blockheight = bh;
+		tal_arr_expand(&utxos, u);
+	}
+	tal_free(stmt);
+
 	u64 base_timestamp = clock_time().ts.tv_sec - 2;
 
 	for (size_t i = 0; i < tal_count(utxos); i++) {

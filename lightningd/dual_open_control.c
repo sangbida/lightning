@@ -1628,6 +1628,7 @@ static void handle_tx_broadcast(struct channel_send *cs)
 
 	/* This might have spent UTXOs from our wallet */
 	wallet_extract_owned_outputs(ld->wallet, wtx, false, NULL);
+	wallet_transaction_add(ld->wallet, wtx, 0, 0);
 
 	if (cmd) {
 		response = json_stream_success(cmd);

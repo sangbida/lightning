@@ -160,9 +160,6 @@ u64 forward_index_update_status(struct lightningd *ld UNNEEDED,
 				struct amount_msat in_amount UNNEEDED,
 				const struct short_channel_id *out_channel UNNEEDED)
 { fprintf(stderr, "forward_index_update_status called!\n"); abort(); }
-/* Generated stub for fromwire_bwatch_utxoset_entry */
-bool fromwire_bwatch_utxoset_entry(const tal_t *ctx UNNEEDED, const void *p UNNEEDED, struct utxoset_entry_wire **entry UNNEEDED)
-{ fprintf(stderr, "fromwire_bwatch_utxoset_entry called!\n"); abort(); }
 /* Generated stub for fromwire_hsmd_get_channel_basepoints_reply */
 bool fromwire_hsmd_get_channel_basepoints_reply(const void *p UNNEEDED, struct basepoints *basepoints UNNEEDED, struct pubkey *funding_pubkey UNNEEDED)
 { fprintf(stderr, "fromwire_hsmd_get_channel_basepoints_reply called!\n"); abort(); }
@@ -432,22 +429,9 @@ const char *wait_index_name(enum wait_index index UNNEEDED)
 /* Generated stub for wait_subsystem_name */
 const char *wait_subsystem_name(enum wait_subsystem subsystem UNNEEDED)
 { fprintf(stderr, "wait_subsystem_name called!\n"); abort(); }
-/* Generated stub for watchman_add_utxo */
-void watchman_add_utxo(struct lightningd *ld UNNEEDED,
-		       const struct bitcoin_outpoint *outpoint UNNEEDED,
-		       u32 blockheight UNNEEDED, u32 txindex UNNEEDED,
-		       const u8 *script UNNEEDED, size_t script_len UNNEEDED,
-		       struct amount_sat sat UNNEEDED,
-		       const char *owner UNNEEDED)
-{ fprintf(stderr, "watchman_add_utxo called!\n"); abort(); }
 /* Generated stub for get_block_height */
 u32 get_block_height(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "get_block_height called!\n"); abort(); }
-/* Generated stub for watchman_lookup_scriptpubkey */
-const char *watchman_lookup_scriptpubkey(struct lightningd *ld UNNEEDED,
-					 const u8 *script UNNEEDED,
-					 size_t script_len UNNEEDED)
-{ fprintf(stderr, "watchman_lookup_scriptpubkey called!\n"); abort(); }
 /* Generated stub for watchman_watch_scriptpubkey */
 void watchman_watch_scriptpubkey(struct lightningd *ld UNNEEDED,
 				 const char *owner UNNEEDED,

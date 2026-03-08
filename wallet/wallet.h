@@ -535,6 +535,23 @@ struct utxo **wallet_utxo_boost(const tal_t *ctx,
 				bool *insufficient);
 
 /**
+ * wallet_scriptpubkey_to_keyidx - Derive HD keyindex for a scriptpubkey.
+ *
+ * Lower-level form that takes (ld, db) directly instead of a wallet.
+ * Callable from migrations (where ld->wallet is not yet initialised).
+ *
+ * @ld: lightningd instance (needs bip32/bip86 base and HSM)
+ * @db: open database (reads bip32_max_index / bip86_max_index)
+ * @script: scriptpubkey to match
+ * @script_len: length of @script
+ * @index: (out) derivation index if found
+ * @addrtype: (out) address type if non-NULL
+ */
+bool wallet_scriptpubkey_to_keyidx(struct lightningd *ld, struct db *db,
+				   const u8 *script, size_t script_len,
+				   u32 *index, enum addrtype *addrtype);
+
+/**
  * wallet_can_spend - Do we have the private key matching this scriptpubkey?
  *
  * @w: (in) wallet holding the pubkeys to check against (privkeys are on HSM)
@@ -1105,7 +1122,7 @@ void wallet_htlc_sigs_add(struct wallet *w, u64 channel_id,
 bool wallet_sanity_check(struct wallet *w);
 
 void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
-			    const u32 blockheight, const u32 txindex);
+			    u32 blockheight, u32 txindex);
 
 void wallet_annotate_txout(struct wallet *w,
 			   const struct bitcoin_outpoint *outpoint,
@@ -1144,8 +1161,8 @@ struct bitcoin_txid *wallet_transactions_by_height(const tal_t *ctx,
 						   const u32 blockheight);
 
 /**
- * Store funding txid spend to start replay on restart
- * Note that tx should already be saved by wallet_transaction_add!
+ * Store funding txid spend to start replay on restart.
+ * Uses our_channel_txs, not the legacy channeltxs table.
  */
 void wallet_insert_funding_spend(struct wallet *w,
 				 const struct channel *chan,
@@ -1153,13 +1170,12 @@ void wallet_insert_funding_spend(struct wallet *w,
 				 const u32 input_num, const u32 blockheight);
 
 /**
- * Get txid and blockheight of the funding spend for this channel, if any.
- * Returns true if found. Fetch the raw tx via bwatch-gettransaction RPC.
+ * Get the transaction which spent funding for this channel, if any.
  */
-bool wallet_get_funding_spend_txid(struct wallet *w,
-				   u64 channel_id,
-				   struct bitcoin_txid *txid,
-				   u32 *blockheight);
+struct bitcoin_tx *wallet_get_funding_spend(const tal_t *ctx,
+					    struct wallet *w,
+					    u64 channel_id,
+					    u32 *blockheight);
 
 /**
  * Add of update a forwarded_payment
@@ -1867,6 +1883,17 @@ void wallet_datastore_save_payment_description(struct db *db,
 					       const struct sha256 *payment_hash,
 					       const char *desc);
 void migrate_setup_coinmoves(struct lightningd *ld, struct db *db);
+
+/**
+ * wallet_add_our_output - Insert a wallet-owned UTXO into our_outputs.
+ * Caller must also register an outpoint watch via watchman_watch_outpoint.
+ */
+void wallet_add_our_output(struct wallet *w,
+			   const struct bitcoin_outpoint *outpoint,
+			   u32 blockheight, u32 txindex,
+			   const u8 *script, size_t script_len,
+			   struct amount_sat sat,
+			   u32 keyindex);
 
 /**
  * wallet_watch_p2wpkh - Handler for P2WPKH scriptpubkey watch_found notifications

@@ -706,12 +706,6 @@ bool wallet_htlcs_load_out_for_channel(struct wallet *wallet UNNEEDED,
 /* Generated stub for wallet_init_channels */
 bool wallet_init_channels(struct wallet *w UNNEEDED)
 { fprintf(stderr, "wallet_init_channels called!\n"); abort(); }
-/* Generated stub for wallet_insert_funding_spend */
-void wallet_insert_funding_spend(struct wallet *w UNNEEDED,
-				 const struct channel *chan UNNEEDED,
-				 const struct bitcoin_txid *txid UNNEEDED,
-				 const u32 input_num UNNEEDED, const u32 blockheight UNNEEDED)
-{ fprintf(stderr, "wallet_insert_funding_spend called!\n"); abort(); }
 /* Generated stub for wallet_offer_find */
 char *wallet_offer_find(const tal_t *ctx UNNEEDED,
 			struct wallet *w UNNEEDED,
@@ -731,10 +725,6 @@ void wallet_save_network_event(struct lightningd *ld UNNEEDED,
 /* Generated stub for wallet_total_forward_fees */
 struct amount_msat wallet_total_forward_fees(struct wallet *w UNNEEDED)
 { fprintf(stderr, "wallet_total_forward_fees called!\n"); abort(); }
-/* Generated stub for wallet_transaction_add */
-void wallet_transaction_add(struct wallet *w UNNEEDED, const struct wally_tx *tx UNNEEDED,
-			    const u32 blockheight UNNEEDED, const u32 txindex UNNEEDED)
-{ fprintf(stderr, "wallet_transaction_add called!\n"); abort(); }
 /* Generated stub for wallet_transaction_height */
 u32 wallet_transaction_height(struct wallet *w UNNEEDED, const struct bitcoin_txid *txid UNNEEDED)
 { fprintf(stderr, "wallet_transaction_height called!\n"); abort(); }

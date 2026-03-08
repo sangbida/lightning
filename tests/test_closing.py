@@ -1851,22 +1851,21 @@ def test_onchaind_replay(node_factory, bitcoind):
     l1.daemon.wait_for_log('sendrawtx exit 0')
     bitcoind.generate_block(1, wait_for_mempool=1)
 
-    # Wait for nodes to notice the failure, this seach needle is after the
-    # DB commit so we're sure the tx entries in onchaindtxs have been added
+    # Wait for nodes to notice the failure; after this we should have a
+    # persisted onchaind restart record.
     l1.daemon.wait_for_log("closing soon due to the funding outpoint being spent")
     l2.daemon.wait_for_log("closing soon due to the funding outpoint being spent")
 
-    # We should at least have the init tx now
-    assert len(l1.db_query("SELECT * FROM channeltxs;")) > 0
-    assert len(l2.db_query("SELECT * FROM channeltxs;")) > 0
+    assert len(l1.db_query("SELECT * FROM our_channel_txs;")) > 0
+    assert len(l2.db_query("SELECT * FROM our_channel_txs;")) > 0
 
     # Generate some blocks so we restart the onchaind from DB (we rescan
     # last_height - 100)
     bitcoind.generate_block(100)
     sync_blockheight(bitcoind, [l1, l2])
 
-    # l1 should still have a running onchaind
-    assert len(l1.db_query("SELECT * FROM channeltxs;")) > 0
+    # l1 should still have the persisted funding-spend record for restart.
+    assert len(l1.db_query("SELECT * FROM our_channel_txs;")) > 0
 
     l2.rpc.stop()
     l1.restart()

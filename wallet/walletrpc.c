@@ -588,10 +588,74 @@ static const struct json_command dev_rescan_output_command = {
 };
 AUTODATA(json_command, &dev_rescan_output_command);
 
-/* listtransactions is now handled by the bwatch plugin. */
+static void json_add_transaction(struct json_stream *response,
+				 const struct wallet_transaction *entry)
+{
+	const struct wally_tx *wtx = entry->tx->wtx;
 
-/* listtransactions is now handled by the bwatch plugin, which stores
- * confirmed transactions that matched watched scriptpubkeys. */
+	json_object_start(response, NULL);
+	json_add_txid(response, "hash", &entry->id);
+	json_add_hex(response, "rawtx", entry->rawtx, tal_bytelen(entry->rawtx));
+	json_add_u32(response, "blockheight", entry->blockheight);
+	json_add_u32(response, "txindex", entry->txindex);
+	json_add_u32(response, "locktime", wtx->locktime);
+	json_add_u32(response, "version", wtx->version);
+
+	json_array_start(response, "inputs");
+	for (size_t i = 0; i < wtx->num_inputs; i++) {
+		struct bitcoin_txid prevtxid;
+		bitcoin_tx_input_get_txid(entry->tx, i, &prevtxid);
+		json_object_start(response, NULL);
+		json_add_txid(response, "txid", &prevtxid);
+		json_add_u32(response, "index", wtx->inputs[i].index);
+		json_add_u32(response, "sequence", wtx->inputs[i].sequence);
+		json_object_end(response);
+	}
+	json_array_end(response);
+
+	json_array_start(response, "outputs");
+	for (size_t i = 0; i < wtx->num_outputs; i++) {
+		struct amount_asset amt = bitcoin_tx_output_get_amount(entry->tx, i);
+		struct amount_sat sat = amount_asset_is_main(&amt)
+			? amount_asset_to_sat(&amt) : AMOUNT_SAT(0);
+		json_object_start(response, NULL);
+		json_add_u32(response, "index", i);
+		json_add_amount_sat_msat(response, "amount_msat", sat);
+		json_add_hex(response, "scriptPubKey",
+			     wtx->outputs[i].script, wtx->outputs[i].script_len);
+		json_object_end(response);
+	}
+	json_array_end(response);
+
+	json_object_end(response);
+}
+
+static struct command_result *json_listtransactions(struct command *cmd,
+						    const char *buffer,
+						    const jsmntok_t *obj UNUSED,
+						    const jsmntok_t *params)
+{
+	struct wallet_transaction *txs;
+	struct json_stream *response;
+
+	if (!param(cmd, buffer, params, NULL))
+		return command_param_failed();
+
+	txs = wallet_transactions_get(tmpctx, cmd->ld->wallet);
+
+	response = json_stream_success(cmd);
+	json_array_start(response, "transactions");
+	for (size_t i = 0; i < tal_count(txs); i++)
+		json_add_transaction(response, &txs[i]);
+	json_array_end(response);
+	return command_success(cmd, response);
+}
+
+static const struct json_command listtransactions_command = {
+	"listtransactions",
+	json_listtransactions,
+};
+AUTODATA(json_command, &listtransactions_command);
 
 static bool in_only_inputs(const u32 *only_inputs, u32 this)
 {
@@ -939,6 +1003,7 @@ static void sendpsbt_done(struct bitcoind *bitcoind UNUSED,
 
 	/* Extract the change output and add it to the DB */
 	wallet_extract_owned_outputs(ld->wallet, sending->wtx, false, NULL);
+	wallet_transaction_add(ld->wallet, sending->wtx, 0, 0);
 
 	for (size_t i = 0; i < sending->psbt->num_outputs; i++)
 		maybe_notify_new_external_send(ld, &txid, i, sending->psbt);

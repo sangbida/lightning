@@ -308,6 +308,7 @@ static struct bitcoin_tx *sign_and_send_last(const tal_t *ctx,
 	tx = sign_last_tx(ctx, channel, last_tx, last_sig);
 	bitcoin_txid(tx, &txid);
 	wallet_extract_owned_outputs(ld->wallet, tx->wtx, false, NULL);
+	wallet_transaction_add(ld->wallet, tx->wtx, 0, 0);
 
 	/* Remember anchor information for commit_tx_boost */
 	adet = create_anchor_details(NULL, channel, tx);
@@ -2355,8 +2356,6 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
 		 "bwatch: wrong funding outpoint spent by %s at block %u",
 		 fmt_bitcoin_txid(tmpctx, &txid), blockheight);
 
-	wallet_insert_funding_spend(channel->peer->ld->wallet, channel,
-				    &txid, innum, blockheight);
 	onchaind_funding_spent(channel, tx, blockheight);
 }
 
@@ -2586,6 +2585,8 @@ void channel_funding_watch_found(struct lightningd *ld,
 	if (!bitcoin_txid_eq(&txid, &channel->funding.txid)
 	    || outnum != channel->funding.n) {
 		/* Could be the splice tx: same P2WSH, different txid. */
+		/* Store in our_txs so depthcb_update_scid can locate it. */
+		wallet_transaction_add(ld->wallet, tx->wtx, blockheight, txindex);
 		if (!channel_splice_watch_found(ld, channel, &txid, outnum,
 						&scid, blockheight))
 			log_unusual(channel->log,
@@ -2605,6 +2606,7 @@ void channel_funding_watch_found(struct lightningd *ld,
 	}
 
 	/* First confirmation of the main funding tx. */
+	wallet_transaction_add(ld->wallet, tx->wtx, blockheight, txindex);
 	wallet_annotate_txout(ld->wallet, &channel->funding,
 			      TX_CHANNEL_FUNDING, channel->dbid);
 	channel_set_scid(channel, &scid);
@@ -2627,7 +2629,7 @@ void channel_funding_spent_watch_found(struct lightningd *ld,
 				       const struct bitcoin_tx *tx,
 				       size_t innum,
 				       u32 blockheight,
-				       u32 txindex UNUSED)
+				       u32 txindex)
 {
 	u32 dbid = atoi(suffix);
 	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
@@ -2662,8 +2664,6 @@ void channel_funding_spent_watch_found(struct lightningd *ld,
 		}
 	}
 
-	wallet_insert_funding_spend(channel->peer->ld->wallet, channel,
-				    &spending_txid, innum, blockheight);
 	onchaind_funding_spent(channel, tx, blockheight);
 }
 

@@ -506,6 +506,7 @@ static void handle_tx_broadcast(struct send_splice_info *info)
 	wallet_extract_owned_outputs(ld->wallet,
 				     info->final_tx->wtx, false,
 				     NULL);
+	wallet_transaction_add(ld->wallet, info->final_tx->wtx, 0, 0);
 
 	if (info->cc) {
 		response = json_stream_success(info->cc->cmd);

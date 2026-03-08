@@ -2,7 +2,10 @@
 #include <bitcoin/block.h>
 #include <bitcoin/tx.h>
 #include <ccan/array_size/array_size.h>
+#include <db/bindings.h>
+#include <db/common.h>
 #include <db/exec.h>
+#include <db/utils.h>
 #include <ccan/json_out/json_out.h>
 #include <ccan/str/str.h>
 #include <ccan/tal/str/str.h>
@@ -25,8 +28,6 @@
 #include <lightningd/notification.h>
 #include <lightningd/onchain_control.h>
 #include <lightningd/peer_control.h>
-#include <ccan/io/io.h>
-#include <lightningd/io_loop_with_timers.h>
 #include <lightningd/plugin.h>
 #include <lightningd/watchman.h>
 #include <wallet/wallet.h>
@@ -162,7 +163,7 @@ struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld)
  * callback never needs to parse the JSON-RPC response id. */
 struct bwatch_ack_arg {
 	struct watchman *wm;
-	const char *op_id;	/* bare "add:owner", "del:owner", "addutxo:owner" */
+	const char *op_id;	/* bare "add:owner" or "del:owner" */
 };
 
 /* Single response callback for bwatch operations (handles both success and error).
@@ -184,7 +185,7 @@ static void bwatch_ack_response(const char *buffer,
 	watchman_ack(arg->wm->ld, arg->op_id);
 }
 
-/* op_id is "add:owner", "del:owner", or "addutxo:owner"; return the owner suffix. */
+/* op_id is "add:owner" or "del:owner"; return the owner suffix. */
 static const char *owner_from_op_id(const char *op_id)
 {
 	const char *colon = strchr(op_id, ':');
@@ -192,7 +193,7 @@ static const char *owner_from_op_id(const char *op_id)
 }
 
 /* Send an RPC request to the bwatch plugin.
- * op_id must include owner as suffix after colon: "add:owner", "del:owner", "addutxo:owner". */
+ * op_id must include owner as suffix after colon: "add:owner" or "del:owner". */
 static void send_to_bwatch(struct watchman *wm, const char *method,
 			   const char *op_id, const char *json_params)
 {
@@ -295,7 +296,7 @@ void watchman_del(struct lightningd *ld, const char *owner, const char *json_par
 /**
  * watchman_ack - Acknowledge a completed watch operation
  *
- * Called when bwatch confirms it has processed an add/del/addutxo operation.
+ * Called when bwatch confirms it has processed an add/del operation.
  * Removes the operation from the pending queue and datastore.
  * op_id must be the bare stored id (e.g. "add:wallet/p2wpkh/0"), not the
  * full JSON-RPC response id.
@@ -331,8 +332,6 @@ void watchman_replay_pending(struct lightningd *ld)
 			method = "addwatch";
 		else if (strstarts(op->op_id, "del:"))
 			method = "delwatch";
-		else if (strstarts(op->op_id, "addutxo:"))
-			method = "addutxo";
 		else {
 			log_broken(wm->ld->log, "Unknown pending op type: %s", op->op_id);
 			continue;
@@ -362,54 +361,6 @@ u32 get_block_height(struct lightningd *ld)
 	return wm->last_processed_height;
 }
 
-/* Context for sync lookupwatch RPC */
-struct lookupwatch_ctx {
-	struct lightningd *ld;
-	const char *owner;  /* result, tal(ld) */
-};
-
-static void lookupwatch_cb(const char *buf, const jsmntok_t *toks,
-			  const jsmntok_t *idtok UNUSED,
-			  struct lookupwatch_ctx *ctx)
-{
-	const jsmntok_t *result_tok = json_get_member(buf, toks, "result");
-	if (result_tok) {
-		bool found;
-		const jsmntok_t *found_tok = json_get_member(buf, result_tok, "found");
-		if (found_tok && json_to_bool(buf, found_tok, &found) && found) {
-			const jsmntok_t *owners_tok = json_get_member(buf, result_tok, "owners");
-			if (owners_tok && owners_tok->type == JSMN_ARRAY && owners_tok->size > 0) {
-				const jsmntok_t *owner_tok = owners_tok + 1;
-				const char *owner = json_strdup(tmpctx, buf, owner_tok);
-				if (owner && strstarts(owner, "wallet/"))
-					ctx->owner = tal_strdup(ctx->ld, owner);
-			}
-		}
-	}
-	io_break(ctx->ld);
-}
-
-const char *watchman_lookup_scriptpubkey(struct lightningd *ld,
-					 const u8 *script,
-					 size_t script_len)
-{
-	struct plugin *bwatch;
-	struct jsonrpc_request *req;
-	struct lookupwatch_ctx ctx = { .ld = ld, .owner = NULL };
-
-	bwatch = find_plugin_for_command(ld, "lookupwatch");
-	if (!bwatch || bwatch->plugin_state != INIT_COMPLETE)
-		return NULL;
-
-	req = jsonrpc_request_start(tmpctx, "lookupwatch", NULL,
-				   bwatch->log, NULL, lookupwatch_cb, &ctx);
-	json_add_hex(req->stream, "scriptpubkey", script, script_len);
-	jsonrpc_request_end(req);
-	plugin_request_send(bwatch, req);
-
-	io_loop_with_timers(ld);
-	return ctx.owner;
-}
 
 void watchman_watch_scriptpubkey(struct lightningd *ld,
 				 const char *owner,
@@ -501,125 +452,6 @@ void watchman_unwatch_scid(struct lightningd *ld,
 			     "{\"type\":\"scid\""
 			     ",\"scid\":\"%s\"}",
 			     fmt_short_channel_id(tmpctx, *scid)));
-}
-
-struct gettransaction_call {
-	struct lightningd *ld;
-	void (*cb)(struct bitcoin_tx *tx, u32 blockheight, void *arg);
-	void *arg;
-};
-
-static void gettransaction_cb(const char *buf, const jsmntok_t *toks,
-			      const jsmntok_t *idtok UNUSED,
-			      struct gettransaction_call *call)
-{
-	const jsmntok_t *result_tok, *rawtx_tok;
-	u8 *rawtx;
-	const u8 *p;
-	size_t len;
-	u32 blockheight;
-	struct bitcoin_tx *tx;
-
-	result_tok = json_get_member(buf, toks, "result");
-	if (!result_tok) {
-		log_unusual(call->ld->log, "bwatch gettransaction failed");
-		tal_free(call);
-		return;
-	}
-
-	rawtx_tok = json_get_member(buf, result_tok, "rawtx");
-	if (!rawtx_tok
-	    || !(rawtx = json_tok_bin_from_hex(tmpctx, buf, rawtx_tok))) {
-		log_unusual(call->ld->log, "bwatch gettransaction: bad rawtx");
-		tal_free(call);
-		return;
-	}
-
-	if (!json_scan(tmpctx, buf, result_tok, "{blockheight:%}",
-		       JSON_SCAN(json_to_u32, &blockheight))) {
-		log_unusual(call->ld->log,
-			    "bwatch gettransaction: missing blockheight");
-		tal_free(call);
-		return;
-	}
-
-	p = rawtx;
-	len = tal_bytelen(rawtx);
-	tx = pull_bitcoin_tx(tmpctx, &p, &len);
-	if (!tx) {
-		log_unusual(call->ld->log,
-			    "bwatch gettransaction: failed to parse rawtx");
-		tal_free(call);
-		return;
-	}
-
-	call->cb(tx, blockheight, call->arg);
-	tal_free(call);
-}
-
-void watchman_get_transaction(struct lightningd *ld,
-			      const struct bitcoin_txid *txid,
-			      void (*cb)(struct bitcoin_tx *tx,
-					 u32 blockheight,
-					 void *arg),
-			      void *arg)
-{
-	struct plugin *bwatch;
-	struct jsonrpc_request *req;
-	struct gettransaction_call *call;
-
-	bwatch = find_plugin_for_command(ld, "gettransaction");
-	if (!bwatch) {
-		log_unusual(ld->log, "bwatch plugin not found, cannot get transaction");
-		return;
-	}
-	if (bwatch->plugin_state != INIT_COMPLETE) {
-		log_unusual(ld->log, "bwatch not ready, cannot get transaction");
-		return;
-	}
-
-	call = tal(ld, struct gettransaction_call);
-	call->ld = ld;
-	call->cb = cb;
-	call->arg = arg;
-
-	req = jsonrpc_request_start(call, "gettransaction",
-				    "gettransaction", bwatch->log,
-				    NULL, gettransaction_cb, call);
-	json_add_txid(req->stream, "txid", txid);
-	jsonrpc_request_end(req);
-	plugin_request_send(bwatch, req);
-}
-
-void watchman_add_utxo(struct lightningd *ld,
-		       const struct bitcoin_outpoint *outpoint,
-		       u32 blockheight, u32 txindex,
-		       const u8 *script, size_t script_len,
-		       struct amount_sat sat,
-		       const char *owner)
-{
-	struct watchman *wm = ld->watchman;
-	struct json_stream *js;
-	size_t len;
-	char *json_params;
-
-	if (!wm)
-		return;
-
-	const char *op_id = tal_fmt(tmpctx, "addutxo:%s", owner);
-
-	js = new_json_stream(tmpctx, NULL, NULL);
-	json_object_start(js, NULL);
-	json_add_outpoint(js, "outpoint", outpoint);
-	json_add_u32(js, "blockheight", blockheight);
-	json_add_u32(js, "txindex", txindex);
-	json_add_hex(js, "scriptpubkey", script, script_len);
-	json_add_u64(js, "satoshis", sat.satoshis);
-	json_object_end(js);
-
-	json_params = tal_strndup(tmpctx, json_out_contents(js->jout, &len), len);
-
-	enqueue_op(wm, "addutxo", op_id, json_params);
 }
 
 /* Dispatch table - add new watch types here */

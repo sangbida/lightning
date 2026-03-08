@@ -144,56 +144,8 @@ void watchman_unwatch_scid(struct lightningd *ld,
 			   const char *owner,
 			   const struct short_channel_id *scid);
 
-/**
- * watchman_get_transaction - Fetch a tx from bwatch via gettransaction RPC.
- *
- * Async: calls bwatch-gettransaction. On success, cb(tx, blockheight, arg)
- * is called. On error cb is not called.
- */
-void watchman_get_transaction(struct lightningd *ld,
-			      const struct bitcoin_txid *txid,
-			      void (*cb)(struct bitcoin_tx *tx,
-					 u32 blockheight,
-					 void *arg),
-			      void *arg);
-
-/**
- * watchman_add_utxo - Add a UTXO to bwatch's datastore
- * @ld: lightningd instance
- * @outpoint: the output to add
- * @blockheight: block height (0 for unconfirmed)
- * @txindex: position in block (0 for unconfirmed)
- * @script: scriptpubkey
- * @script_len: script length
- * @sat: amount in satoshis
- * @owner: required; bwatch registers WATCH_OUTPOINT so we get notified when
- *         spent (e.g. "wallet/utxo/<txid>:<outnum>" or "onchaind/outpoint/<dbid>").
- *         Bwatch deduplicates if the same owner already watches.
- *
- * Fire-and-forget; bwatch must be ready.
- */
-void watchman_add_utxo(struct lightningd *ld,
-		       const struct bitcoin_outpoint *outpoint,
-		       u32 blockheight, u32 txindex,
-		       const u8 *script, size_t script_len,
-		       struct amount_sat sat,
-		       const char *owner);
-
 /* Get highest block number (from bwatch). */
 u32 get_block_height(struct lightningd *ld);
 
-/**
- * watchman_lookup_scriptpubkey - Look up a scriptpubkey in bwatch via RPC
- * @ld: lightningd instance
- * @script: the scriptpubkey to look up
- * @script_len: length of script
- *
- * Synchronous: calls bwatch lookupwatch RPC and blocks until response.
- * Returns the first wallet owner string (e.g. "wallet/p2wpkh/42") if found,
- * NULL otherwise. Caller parses owner for keyidx/addrtype.
- */
-const char *watchman_lookup_scriptpubkey(struct lightningd *ld,
-					 const u8 *script,
-					 size_t script_len);
 
 #endif /* LIGHTNING_LIGHTNINGD_WATCHMAN_H */

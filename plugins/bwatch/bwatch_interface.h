@@ -44,20 +44,5 @@ struct command_result *json_bwatch_list(struct command *cmd,
 					const char *buffer,
 					const jsmntok_t *params);
 
-struct command_result *json_bwatch_addutxo(struct command *cmd,
-					   const char *buffer,
-					   const jsmntok_t *params);
-
-struct command_result *json_bwatch_get_transaction(struct command *cmd,
-						   const char *buffer,
-						   const jsmntok_t *params);
-
-struct command_result *json_bwatch_lookup(struct command *cmd,
-					  const char *buffer,
-					  const jsmntok_t *params);
-
-struct command_result *json_bwatch_list_transactions(struct command *cmd,
-						     const char *buffer,
-						     const jsmntok_t *params);
 
 #endif /* LIGHTNING_PLUGINS_BWATCH_BWATCH_INTERFACE_H */
