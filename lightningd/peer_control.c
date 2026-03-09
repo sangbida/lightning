@@ -2338,8 +2338,8 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
 					     u32 blockheight,
 					     u32 txindex UNUSED)
 {
-	u32 dbid = atoi(suffix);
-	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
 	struct bitcoin_txid txid;
 
 	if (!channel) {
@@ -2374,8 +2374,8 @@ void channel_rogue_inflight_watch_found(struct lightningd *ld,
 					u32 blockheight UNUSED,
 					u32 txindex UNUSED)
 {
-	u32 dbid = atoi(suffix);
-	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
 	struct channel_inflight *inflight, *other;
 	struct bitcoin_txid txid;
 	const char *owner;
@@ -2547,8 +2547,8 @@ void channel_funding_watch_found(struct lightningd *ld,
 				 u32 blockheight,
 				 u32 txindex)
 {
-	u32 dbid = atoi(suffix);
-	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
 	struct bitcoin_txid txid;
 
 	if (!channel) {
@@ -2622,8 +2622,8 @@ void channel_funding_spent_watch_found(struct lightningd *ld,
 				       u32 blockheight,
 				       u32 txindex)
 {
-	u32 dbid = atoi(suffix);
-	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
 	struct bitcoin_txid spending_txid;
 	struct channel_inflight *inflight;
 

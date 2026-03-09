@@ -301,8 +301,8 @@ void onchaind_output_watch_found(struct lightningd *ld,
 				 u32 blockheight,
 				 u32 txindex UNUSED)
 {
-	u32 dbid = atoi(suffix);
-	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
 
 	if (!channel) {
 		log_broken(ld->log,
@@ -336,8 +336,8 @@ void onchaind_tx_watch_found(struct lightningd *ld,
 			     u32 blockheight,
 			     u32 txindex UNUSED)
 {
-	u32 dbid = atoi(suffix);
-	struct channel *channel = channel_by_dbid(ld, (u64)dbid);
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
 	struct bitcoin_txid txid;
 	struct onchaind_watched_tx *entry;
 	u32 depth;

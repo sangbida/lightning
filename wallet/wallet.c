@@ -3055,8 +3055,8 @@ void wallet_watch_p2wpkh(struct lightningd *ld,
 			 u32 blockheight,
 			 u32 txindex)
 {
-	wallet_watch_scriptpubkey_common(ld, atoi(suffix), ADDR_BECH32,
-					 tx, outnum, blockheight, txindex);
+	wallet_watch_scriptpubkey_common(ld, (u32)strtoull(suffix, NULL, 10), ADDR_BECH32,
+				 tx, outnum, blockheight, txindex);
 }
 
 void wallet_watch_p2tr(struct lightningd *ld,
@@ -3066,8 +3066,8 @@ void wallet_watch_p2tr(struct lightningd *ld,
 		       u32 blockheight,
 		       u32 txindex)
 {
-	wallet_watch_scriptpubkey_common(ld, atoi(suffix), ADDR_P2TR,
-					 tx, outnum, blockheight, txindex);
+	wallet_watch_scriptpubkey_common(ld, (u32)strtoull(suffix, NULL, 10), ADDR_P2TR,
+				 tx, outnum, blockheight, txindex);
 }
 
 void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
@@ -3077,8 +3077,8 @@ void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
 			      u32 blockheight,
 			      u32 txindex)
 {
-	wallet_watch_scriptpubkey_common(ld, atoi(suffix), ADDR_P2SH_SEGWIT,
-					 tx, outnum, blockheight, txindex);
+	wallet_watch_scriptpubkey_common(ld, (u32)strtoull(suffix, NULL, 10), ADDR_P2SH_SEGWIT,
+				 tx, outnum, blockheight, txindex);
 }
 
 void wallet_htlc_save_in(struct wallet *wallet,
