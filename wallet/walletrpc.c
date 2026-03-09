@@ -1002,7 +1002,7 @@ static void sendpsbt_done(struct bitcoind *bitcoind UNUSED,
 	wally_txid(sending->wtx, &txid);
 
 	/* Extract the change output and add it to the DB */
-	wallet_extract_owned_outputs(ld->wallet, sending->wtx, false, NULL);
+	wallet_extract_owned_outputs(ld->wallet, sending->wtx, false, NULL, NULL);
 	wallet_transaction_add(ld->wallet, sending->wtx, 0, 0);
 
 	for (size_t i = 0; i < sending->psbt->num_outputs; i++)

@@ -742,11 +742,14 @@ void wallet_channel_stats_incr_out_offered(struct wallet *w, u64 cdbid, struct a
 void wallet_channel_stats_incr_out_fulfilled(struct wallet *w, u64 cdbid, struct amount_msat msatoshi);
 
 /**
- * wallet_extract_owned_outputs - given a tx, extract all of our outputs
+ * wallet_extract_owned_outputs - given a tx, extract all of our outputs.
+ * Returns true if any owned outputs found. If outputs is non-NULL, appends
+ * the matching output indices to the array.
  */
-int wallet_extract_owned_outputs(struct wallet *w, const struct wally_tx *tx,
-				 bool is_coinbase,
-				 const u32 *blockheight);
+bool wallet_extract_owned_outputs(struct wallet *w, const struct wally_tx *tx,
+				  bool is_coinbase,
+				  const u32 *blockheight,
+				  size_t **outputs);
 
 /**
  * wallet_htlc_save_in - store an htlc_in in the database

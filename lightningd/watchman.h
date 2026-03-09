@@ -5,6 +5,7 @@
 #include <bitcoin/short_channel_id.h>
 #include <bitcoin/tx.h>
 #include <ccan/tal/str/str.h>
+#include <inttypes.h>
 #include <lightningd/feerate.h>
 
 struct lightningd;

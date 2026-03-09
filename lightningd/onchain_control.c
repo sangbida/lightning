@@ -306,7 +306,7 @@ void onchaind_output_watch_found(struct lightningd *ld,
 
 	if (!channel) {
 		log_broken(ld->log,
-			   "onchaind/outpoint watch_found: unknown channel dbid %u", dbid);
+			   "onchaind/outpoint watch_found: unknown channel dbid %"PRIu64, dbid);
 		return;
 	}
 
@@ -344,7 +344,7 @@ void onchaind_tx_watch_found(struct lightningd *ld,
 
 	if (!channel) {
 		log_broken(ld->log,
-			   "onchaind/txid watch_found: unknown channel dbid %u", dbid);
+			   "onchaind/txid watch_found: unknown channel dbid %"PRIu64, dbid);
 		return;
 	}
 

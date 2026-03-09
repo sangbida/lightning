@@ -307,7 +307,7 @@ static struct bitcoin_tx *sign_and_send_last(const tal_t *ctx,
 
 	tx = sign_last_tx(ctx, channel, last_tx, last_sig);
 	bitcoin_txid(tx, &txid);
-	wallet_extract_owned_outputs(ld->wallet, tx->wtx, false, NULL);
+	wallet_extract_owned_outputs(ld->wallet, tx->wtx, false, NULL, NULL);
 	wallet_transaction_add(ld->wallet, tx->wtx, 0, 0);
 
 	/* Remember anchor information for commit_tx_boost */
@@ -2344,7 +2344,7 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
 
 	if (!channel) {
 		log_broken(ld->log,
-			   "channel/wrong_funding_spent watch_found: no channel for dbid %u",
+			   "channel/wrong_funding_spent watch_found: no channel for dbid %"PRIu64,
 			   dbid);
 		return;
 	}
@@ -2382,7 +2382,7 @@ void channel_rogue_inflight_watch_found(struct lightningd *ld,
 
 	if (!channel) {
 		log_broken(ld->log,
-			   "channel/rogue_inflight watch_found: no channel for dbid %u",
+			   "channel/rogue_inflight watch_found: no channel for dbid %"PRIu64,
 			   dbid);
 		return;
 	}
@@ -2394,7 +2394,7 @@ void channel_rogue_inflight_watch_found(struct lightningd *ld,
 	if (!inflight) {
 		log_unusual(channel->log,
 			    "bwatch: rogue inflight watch fired for unknown txid %s"
-			    " (dbid %u) - ignoring",
+			    " (dbid %"PRIu64") - ignoring",
 			    fmt_bitcoin_txid(tmpctx, &txid), dbid);
 		return;
 	}
@@ -2553,7 +2553,7 @@ void channel_funding_watch_found(struct lightningd *ld,
 
 	if (!channel) {
 		log_broken(ld->log,
-			   "channel/funding watch_found: no channel for dbid %u",
+			   "channel/funding watch_found: no channel for dbid %"PRIu64,
 			   dbid);
 		return;
 	}
@@ -2629,7 +2629,7 @@ void channel_funding_spent_watch_found(struct lightningd *ld,
 
 	if (!channel) {
 		log_broken(ld->log,
-			   "channel/funding_spent watch_found: no channel for dbid %u",
+			   "channel/funding_spent watch_found: no channel for dbid %"PRIu64,
 			   dbid);
 		return;
 	}

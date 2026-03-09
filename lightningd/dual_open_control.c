@@ -1627,7 +1627,7 @@ static void handle_tx_broadcast(struct channel_send *cs)
 	struct bitcoin_txid txid;
 
 	/* This might have spent UTXOs from our wallet */
-	wallet_extract_owned_outputs(ld->wallet, wtx, false, NULL);
+	wallet_extract_owned_outputs(ld->wallet, wtx, false, NULL, NULL);
 	wallet_transaction_add(ld->wallet, wtx, 0, 0);
 
 	if (cmd) {

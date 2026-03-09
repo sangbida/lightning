@@ -505,7 +505,7 @@ static void handle_tx_broadcast(struct send_splice_info *info)
 	/* This might have spent UTXOs from our wallet */
 	wallet_extract_owned_outputs(ld->wallet,
 				     info->final_tx->wtx, false,
-				     NULL);
+				     NULL, NULL);
 	wallet_transaction_add(ld->wallet, info->final_tx->wtx, 0, 0);
 
 	if (info->cc) {
