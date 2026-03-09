@@ -214,8 +214,8 @@ static void bwatch_register_tx(struct channel *channel,
 	entry->num_outputs = tx->wtx->num_outputs;
 	onchaind_tx_map_add(channel->onchaind_watches, entry);
 
-	owner_tx  = tal_fmt(tmpctx, "onchaind/txid/%"PRIu64, channel->dbid);
-	owner_out = tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid);
+	owner_tx  = owner_onchaind_txid(tmpctx, channel->dbid);
+	owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid);
 
 	watchman_watch_txid(ld, owner_tx, &outpoint.txid, blockheight);
 
@@ -250,11 +250,11 @@ static void onchaind_spent_reply(struct subd *onchaind, const u8 *msg,
 
 	/* Unwatch txid and all outputs from bwatch */
 	watchman_unwatch_txid(ld,
-			      tal_fmt(tmpctx, "onchaind/txid/%"PRIu64, channel->dbid),
+			      owner_onchaind_txid(tmpctx, channel->dbid),
 			      txid);
 
 	struct bitcoin_outpoint outpoint = { .txid = *txid };
-	const char *owner_out = tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid);
+	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid);
 	for (outpoint.n = 0; outpoint.n < entry->num_outputs; outpoint.n++)
 		watchman_unwatch_outpoint(ld, owner_out, &outpoint);
 
@@ -543,7 +543,7 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 		  csv_lock);
 
 	watchman_watch_outpoint(channel->peer->ld,
-				tal_fmt(tmpctx, "onchaind/outpoint/%"PRIu64, channel->dbid),
+				owner_onchaind_outpoint(tmpctx, channel->dbid),
 				&outpoint, blockheight);
 
 	mvt = new_coin_wallet_deposit(msg, &outpoint, blockheight,

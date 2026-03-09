@@ -419,12 +419,10 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 			if (bitcoin_outpoint_eq(&inflight->funding->outpoint,
 						&channel->funding))
 				continue;
-			watchman_watch_txid(ld,
-				tal_fmt(tmpctx,
-					"channel/rogue_inflight/%"PRIu64,
-					channel->dbid),
-				&inflight->funding->outpoint.txid,
-				get_block_height(ld));
+		watchman_watch_txid(ld,
+			owner_channel_rogue_inflight(tmpctx, channel->dbid),
+			&inflight->funding->outpoint.txid,
+			get_block_height(ld));
 		}
 	}
 }
@@ -2406,7 +2404,7 @@ void channel_rogue_inflight_watch_found(struct lightningd *ld,
 		    " — triggering onchaind for fund recovery",
 		    fmt_bitcoin_txid(tmpctx, &txid));
 
-	owner = tal_fmt(tmpctx, "channel/rogue_inflight/%"PRIu64, channel->dbid);
+	owner = owner_channel_rogue_inflight(tmpctx, channel->dbid);
 
 	/* Cancel watches for all other inflights — one of them just won,
 	 * the others are irrelevant. */
@@ -2435,12 +2433,10 @@ void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
 {
 	/* Watch the "wrong" funding too, in case we spend it. */
 	if (channel->shutdown_wrong_funding) {
-		watchman_watch_outpoint(ld,
-					tal_fmt(tmpctx,
-						"channel/wrong_funding_spent/%"PRIu64,
-						channel->dbid),
-					channel->shutdown_wrong_funding,
-					get_block_height(ld));
+	watchman_watch_outpoint(ld,
+				owner_channel_wrong_funding_spent(tmpctx, channel->dbid),
+				channel->shutdown_wrong_funding,
+				get_block_height(ld));
 	}
 }
 
@@ -2450,8 +2446,7 @@ void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
 void channel_unwatch_funding(struct lightningd *ld, struct channel *channel)
 {
 	watchman_unwatch_outpoint(ld,
-				  tal_fmt(tmpctx, "channel/funding_spent/%"PRIu64,
-					  channel->dbid),
+				  owner_channel_funding_spent(tmpctx, channel->dbid),
 				  &channel->funding);
 }
 
@@ -2470,8 +2465,7 @@ void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 			  "bwatch: adding scriptpubkey watch for funding (dbid %"PRIu64")",
 			  channel->dbid);
 		watchman_watch_scriptpubkey(ld,
-					    tal_fmt(tmpctx, "channel/funding/%"PRIu64,
-						    channel->dbid),
+					    owner_channel_funding(tmpctx, channel->dbid),
 					    scriptpubkey, tal_count(scriptpubkey),
 					    get_block_height(ld));
 	} else {
@@ -2483,10 +2477,9 @@ void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 			  channel->funding.n,
 			  channel->dbid);
 		watchman_watch_outpoint(ld,
-					tal_fmt(tmpctx, "channel/funding_spent/%"PRIu64,
-						channel->dbid),
-					&channel->funding,
-					get_block_height(ld));
+				owner_channel_funding_spent(tmpctx, channel->dbid),
+				&channel->funding,
+				get_block_height(ld));
 	}
 	channel_watch_wrong_funding(ld, channel);
 }
@@ -2523,8 +2516,7 @@ static bool channel_splice_watch_found(struct lightningd *ld,
 
 		/* Remove watch on old funding outpoint. */
 		watchman_unwatch_outpoint(ld,
-			tal_fmt(tmpctx, "channel/funding_spent/%"PRIu64,
-				channel->dbid),
+			owner_channel_funding_spent(tmpctx, channel->dbid),
 			&channel->funding);
 
 		/* Update channel to the new splice funding outpoint. */
@@ -2536,8 +2528,7 @@ static bool channel_splice_watch_found(struct lightningd *ld,
 
 		/* Watch new funding outpoint for spends (same owner). */
 		watchman_watch_outpoint(ld,
-			tal_fmt(tmpctx, "channel/funding_spent/%"PRIu64,
-				channel->dbid),
+			owner_channel_funding_spent(tmpctx, channel->dbid),
 			&channel->funding,
 			blockheight);
 
@@ -2619,7 +2610,7 @@ void channel_funding_watch_found(struct lightningd *ld,
 	/* Install the outpoint spend watch so bwatch tells us when the
 	 * funding output is spent (close / force-close). */
 	watchman_watch_outpoint(ld,
-				tal_fmt(tmpctx, "channel/funding_spent/%u", dbid),
+				owner_channel_funding_spent(tmpctx, dbid),
 				&channel->funding,
 				blockheight);
 }

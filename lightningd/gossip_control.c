@@ -37,8 +37,7 @@ static void get_txout(struct subd *gossip, const u8 *msg)
 	if (blockheight < start_block)
 		start_block = blockheight;
 	watchman_watch_scid(gossip->ld,
-			   tal_fmt(gossip, "gossip/%s",
-				   fmt_short_channel_id(gossip, scid)),
+			   owner_gossip_scid(gossip, scid),
 			   &scid, start_block);
 }
 

@@ -95,8 +95,7 @@ void wallet_add_bwatch_scriptpubkey(struct lightningd *ld,
 				    const u8 *script,
 				    size_t script_len)
 {
-	const char *owner = tal_fmt(tmpctx, "wallet/%s/%"PRIu64,
-				    owner_prefix, keyindex);
+	const char *owner = tal_fmt(tmpctx, "wallet/%s/%"PRIu64, owner_prefix, keyindex);
 	watchman_watch_scriptpubkey(ld, owner, script, script_len, start_block);
 }
 
@@ -2953,8 +2952,7 @@ type_ok:
 			      utxo->amount,
 			      utxo->keyindex);
 	watchman_watch_outpoint(w->ld,
-				tal_fmt(tmpctx, "wallet/utxo/%s",
-					fmt_bitcoin_outpoint(tmpctx, &utxo->outpoint)),
+				owner_wallet_utxo(tmpctx, &utxo->outpoint),
 				&utxo->outpoint,
 				blockheight ? *blockheight : 0);
 

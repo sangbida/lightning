@@ -4,6 +4,7 @@
 #include "config.h"
 #include <bitcoin/short_channel_id.h>
 #include <bitcoin/tx.h>
+#include <ccan/tal/str/str.h>
 #include <lightningd/feerate.h>
 
 struct lightningd;
@@ -147,5 +148,52 @@ void watchman_unwatch_scid(struct lightningd *ld,
 /* Get highest block number (from bwatch). */
 u32 get_block_height(struct lightningd *ld);
 
+/*
+ * Owner string constructors.
+ *
+ * Always use these instead of raw tal_fmt() to build owner strings.
+ * Using a single constructor for both watchman_add and watchman_del
+ * guarantees the strings are identical and the del can never silently fail
+ * due to a format mismatch (e.g. %u vs PRIu64).
+ */
+
+/* wallet/ owners */
+static inline const char *owner_wallet_p2wpkh(const tal_t *ctx, u64 keyidx)
+{ return tal_fmt(ctx, "wallet/p2wpkh/%"PRIu64, keyidx); }
+
+static inline const char *owner_wallet_p2tr(const tal_t *ctx, u64 keyidx)
+{ return tal_fmt(ctx, "wallet/p2tr/%"PRIu64, keyidx); }
+
+static inline const char *owner_wallet_p2sh_p2wpkh(const tal_t *ctx, u64 keyidx)
+{ return tal_fmt(ctx, "wallet/p2sh_p2wpkh/%"PRIu64, keyidx); }
+
+static inline const char *owner_wallet_utxo(const tal_t *ctx,
+					     const struct bitcoin_outpoint *op)
+{ return tal_fmt(ctx, "wallet/utxo/%s", fmt_bitcoin_outpoint(ctx, op)); }
+
+/* channel/ owners */
+static inline const char *owner_channel_funding(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "channel/funding/%"PRIu64, dbid); }
+
+static inline const char *owner_channel_funding_spent(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "channel/funding_spent/%"PRIu64, dbid); }
+
+static inline const char *owner_channel_wrong_funding_spent(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "channel/wrong_funding_spent/%"PRIu64, dbid); }
+
+static inline const char *owner_channel_rogue_inflight(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "channel/rogue_inflight/%"PRIu64, dbid); }
+
+/* onchaind/ owners */
+static inline const char *owner_onchaind_txid(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "onchaind/txid/%"PRIu64, dbid); }
+
+static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "onchaind/outpoint/%"PRIu64, dbid); }
+
+/* gossip/ owners */
+static inline const char *owner_gossip_scid(const tal_t *ctx,
+					     struct short_channel_id scid)
+{ return tal_fmt(ctx, "gossip/%s", fmt_short_channel_id(ctx, scid)); }
 
 #endif /* LIGHTNING_LIGHTNINGD_WATCHMAN_H */
