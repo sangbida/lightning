@@ -97,6 +97,76 @@ static struct command_result *poll_finished(struct command *cmd)
 	return timer_complete(cmd);
 }
 
+/* Collect all owner strings from every watch triggered at or after
+ * removed_height, then send watch_revert for each one.
+ *
+ * We snapshot owners into a temporary array before sending any notifications.
+ * This protects against second-order watch modifications: a revert handler may
+ * call watchman_del which arrives back at bwatch and mutates the hash tables.
+ * By finishing all iteration before any sending, we avoid both missing entries
+ * and operating on a table that is being concurrently resized. */
+static void bwatch_notify_reorg_watches(struct command *cmd,
+					struct bwatch *bwatch,
+					u32 removed_height)
+{
+	const char **owners = tal_arr(tmpctx, const char *, 0);
+	struct watch *w;
+
+	struct scriptpubkey_watches_iter sit;
+	for (w = scriptpubkey_watches_first(bwatch->scriptpubkey_watches, &sit);
+	     w;
+	     w = scriptpubkey_watches_next(bwatch->scriptpubkey_watches, &sit)) {
+		if (w->start_block < removed_height)
+			continue;
+		for (size_t i = 0; i < tal_count(w->owners); i++)
+			tal_arr_expand(&owners, w->owners[i]);
+	}
+
+	struct outpoint_watches_iter oit;
+	for (w = outpoint_watches_first(bwatch->outpoint_watches, &oit);
+	     w;
+	     w = outpoint_watches_next(bwatch->outpoint_watches, &oit)) {
+		if (w->start_block < removed_height)
+			continue;
+		for (size_t i = 0; i < tal_count(w->owners); i++)
+			tal_arr_expand(&owners, w->owners[i]);
+	}
+
+	struct txid_watches_iter tit;
+	for (w = txid_watches_first(bwatch->txid_watches, &tit);
+	     w;
+	     w = txid_watches_next(bwatch->txid_watches, &tit)) {
+		if (w->start_block < removed_height)
+			continue;
+		for (size_t i = 0; i < tal_count(w->owners); i++)
+			tal_arr_expand(&owners, w->owners[i]);
+	}
+
+	struct scid_watches_iter scit;
+	for (w = scid_watches_first(bwatch->scid_watches, &scit);
+	     w;
+	     w = scid_watches_next(bwatch->scid_watches, &scit)) {
+		if (w->start_block < removed_height)
+			continue;
+		for (size_t i = 0; i < tal_count(w->owners); i++)
+			tal_arr_expand(&owners, w->owners[i]);
+	}
+
+	struct blockdepth_watches_iter bdit;
+	for (w = blockdepth_watches_first(bwatch->blockdepth_watches, &bdit);
+	     w;
+	     w = blockdepth_watches_next(bwatch->blockdepth_watches, &bdit)) {
+		if (w->start_block < removed_height)
+			continue;
+		for (size_t i = 0; i < tal_count(w->owners); i++)
+			tal_arr_expand(&owners, w->owners[i]);
+	}
+
+	/* FIXME: Add a htable lock here so we don't send notifications while the htable is being resized. */
+	for (size_t i = 0; i < tal_count(owners); i++)
+		bwatch_send_watch_revert(cmd, owners[i], removed_height);
+}
+
 /* Remove tip block on reorg (exposed for bwatch_interface.c) */
 void bwatch_remove_tip(struct command *cmd, struct bwatch *bwatch)
 {
@@ -112,12 +182,9 @@ void bwatch_remove_tip(struct command *cmd, struct bwatch *bwatch)
 		   bwatch->current_height,
 		   fmt_bitcoin_blkid(tmpctx, &bwatch->current_blockhash));
 
-	/* Prune watches added at the disconnected block and notify watchman
-	 * to revert any side-effects each owner triggered. */
-	const char **owners = bwatch_prune_watches_added_at_or_after(
-		tmpctx, cmd, bwatch, bwatch->current_height);
-	for (size_t i = 0; i < tal_count(owners); i++)
-		bwatch_send_watch_revert(cmd, owners[i], bwatch->current_height);
+	/* Notify owners whose watch was triggered at or after the disconnected
+	 * block. */
+	bwatch_notify_reorg_watches(cmd, bwatch, bwatch->current_height);
 
 	/* Delete block from datastore */
 	bwatch_delete_block_from_datastore(cmd, bwatch->current_height);
@@ -184,8 +251,9 @@ static struct command_result *handle_block(struct command *cmd,
 			return fetch_block_handle(cmd, *block_height, handle_block, block_height);
 		}
 
-		/* Good block, process watches */
+		/* Good block, process tx watches then fire blockdepth notifications */
 		bwatch_process_block_txs(cmd, bwatch, block, *block_height, &blockhash, NULL);
+		bwatch_check_blockdepth_watches(cmd, bwatch, *block_height);
 	}
 
 	/* Update state */
@@ -368,6 +436,7 @@ static const char *init(struct command *cmd,
 	bwatch->outpoint_watches = new_htable(bwatch, outpoint_watches);
 	bwatch->txid_watches = new_htable(bwatch, txid_watches);
 	bwatch->scid_watches = new_htable(bwatch, scid_watches);
+	bwatch->blockdepth_watches = new_htable(bwatch, blockdepth_watches);
 
 	/* Initialize block history */
 	bwatch->block_history = tal_arr(bwatch, struct block_record_wire *, 0);
@@ -391,18 +460,17 @@ static const char *init(struct command *cmd,
 }
 
 static const struct plugin_command commands[] = {
-	{
-		"addwatch",
-		json_bwatch_add,
-	},
-	{
-		"delwatch",
-		json_bwatch_del,
-	},
-	{
-		"listwatch",
-		json_bwatch_list,
-	},
+	{ "addscriptpubkeywatch", json_bwatch_add_scriptpubkey },
+	{ "addoutpointwatch",     json_bwatch_add_outpoint     },
+	{ "addtxidwatch",         json_bwatch_add_txid         },
+	{ "addscidwatch",         json_bwatch_add_scid         },
+	{ "addblockdepthwatch",   json_bwatch_add_blockdepth   },
+	{ "delscriptpubkeywatch", json_bwatch_del_scriptpubkey },
+	{ "deloutpointwatch",     json_bwatch_del_outpoint     },
+	{ "deltxidwatch",         json_bwatch_del_txid         },
+	{ "delscidwatch",         json_bwatch_del_scid         },
+	{ "delblockdepthwatch",   json_bwatch_del_blockdepth   },
+	{ "listwatch",            json_bwatch_list             },
 };
 
 int main(int argc, char *argv[])

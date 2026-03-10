@@ -27,7 +27,7 @@ struct watchman {
 };
 
 /**
- * watch_found_fn - Handler for watch_found notifications
+ * watch_found_fn - Handler for watch_found notifications (tx-based watches)
  * @ld: lightningd instance
  * @suffix: the owner string after the prefix (e.g. "42" for wallet/p2wpkh/42,
  *          or "100x1x0" for gossip/100x1x0); the handler is responsible for
@@ -51,6 +51,19 @@ typedef void (*watch_revert_fn)(struct lightningd *ld,
 				u32 blockheight);
 
 /**
+ * depth_found_fn - Handler for blockdepth watch notifications.
+ * @depth: new_height - confirm_height + 1 (always >= 1)
+ * @blockheight: current chain tip height
+ *
+ * Called once per new block.  When the confirming block is reorged away,
+ * watch_revert_fn is called instead.
+ */
+typedef void (*depth_found_fn)(struct lightningd *ld,
+			       const char *suffix,
+			       u32 depth,
+			       u32 blockheight);
+
+/**
  * watchman_new - Create and initialize a new watchman instance
  * @ctx: tal context to allocate from
  * @ld: lightningd instance
@@ -58,32 +71,6 @@ typedef void (*watch_revert_fn)(struct lightningd *ld,
  * Returns a new watchman instance, loading pending operations from datastore.
  */
 struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld);
-
-/**
- * watchman_add - Add a watch via raw JSON params
- * @ld: lightningd instance
- * @owner: the owner identifier (e.g., "wallet/p2wpkh/42")
- * @json_params: the raw JSON params string to send to bwatch
- *
- * Adds a watch to the pending queue and sends it to bwatch.
- * If a conflicting delete is pending, it will be canceled.
- */
-void watchman_add(struct lightningd *ld,
-		  const char *owner,
-		  const char *json_params);
-
-/**
- * watchman_del - Remove a watch via raw JSON params
- * @ld: lightningd instance
- * @owner: the owner identifier
- * @json_params: the raw JSON params string to send to bwatch
- *
- * Removes a watch by adding a delete operation to the pending queue.
- * If a conflicting add is pending, it will be canceled instead.
- */
-void watchman_del(struct lightningd *ld,
-		  const char *owner,
-		  const char *json_params);
 
 /**
  * watchman_ack - Acknowledge a completed watch operation
@@ -146,6 +133,21 @@ void watchman_unwatch_scid(struct lightningd *ld,
 			   const char *owner,
 			   const struct short_channel_id *scid);
 
+/**
+ * watchman_watch_blockdepth - Register a WATCH_BLOCKDEPTH
+ * @ld: lightningd instance
+ * @owner: the owner identifier (e.g. "channel/funding_depth/42")
+ * @confirm_height: the block height where the tx of interest was confirmed
+ */
+void watchman_watch_blockdepth(struct lightningd *ld,
+			       const char *owner,
+			       u32 confirm_height);
+
+/** Remove a WATCH_BLOCKDEPTH. */
+void watchman_unwatch_blockdepth(struct lightningd *ld,
+				 const char *owner,
+				 u32 confirm_height);
+
 /* Get highest block number (from bwatch). */
 u32 get_block_height(struct lightningd *ld);
 
@@ -196,5 +198,17 @@ static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid)
 static inline const char *owner_gossip_scid(const tal_t *ctx,
 					     struct short_channel_id scid)
 { return tal_fmt(ctx, "gossip/%s", fmt_short_channel_id(ctx, scid)); }
+
+/*
+ * blockdepth/ owner string constructors. */
+static inline const char *owner_channel_funding_depth(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "channel/funding_depth/%"PRIu64, dbid); }
+
+
+static inline const char *owner_onchaind_csv(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "onchaind/csv/%"PRIu64, dbid); }
+
+static inline const char *owner_onchaind_htlc_depth(const tal_t *ctx, u64 dbid)
+{ return tal_fmt(ctx, "onchaind/htlc_depth/%"PRIu64, dbid); }
 
 #endif /* LIGHTNING_LIGHTNINGD_WATCHMAN_H */

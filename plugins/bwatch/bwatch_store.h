@@ -29,6 +29,10 @@ const struct short_channel_id *scid_watch_keyof(const struct watch *w);
 size_t scid_hash(const struct short_channel_id *scid);
 bool scid_watch_eq(const struct watch *w, const struct short_channel_id *scid);
 
+const u32 *blockdepth_watch_keyof(const struct watch *w);
+size_t u32_hash(const u32 *height);
+bool blockdepth_watch_eq(const struct watch *w, const u32 *height);
+
 /* Define hash table types */
 HTABLE_DEFINE_NODUPS_TYPE(struct watch, scriptpubkey_watch_keyof,
 			  scriptpubkey_hash, scriptpubkey_watch_eq,
@@ -45,6 +49,10 @@ HTABLE_DEFINE_NODUPS_TYPE(struct watch, txid_watch_keyof,
 HTABLE_DEFINE_NODUPS_TYPE(struct watch, scid_watch_keyof,
 			  scid_hash, scid_watch_eq,
 			  scid_watches);
+
+HTABLE_DEFINE_NODUPS_TYPE(struct watch, blockdepth_watch_keyof,
+			  u32_hash, blockdepth_watch_eq,
+			  blockdepth_watches);
 
 /*
  * ============================================================================
@@ -73,7 +81,8 @@ struct watch *bwatch_get_watch(struct bwatch *bwatch,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
 			       const struct bitcoin_txid *txid,
-			       const struct short_channel_id *scid);
+			       const struct short_channel_id *scid,
+			       const u32 *confirm_height);
 void bwatch_remove_watch_from_hash(struct bwatch *bwatch, struct watch *w);
 
 /* Watch datastore operations */
@@ -89,6 +98,7 @@ struct watch *bwatch_add_watch(struct command *cmd,
 			       const u8 *scriptpubkey,
 			       const struct bitcoin_txid *txid,
 			       const struct short_channel_id *scid,
+			       const u32 *confirm_height,
 			       u32 start_block,
 			       const char *owner_id);
 
@@ -99,13 +109,8 @@ void bwatch_del_watch(struct command *cmd,
 		      const u8 *scriptpubkey,
 		      const struct bitcoin_txid *txid,
 		      const struct short_channel_id *scid,
+		      const u32 *confirm_height,
 		      const char *owner_id);
 
-/* Returns a tal array of owner strings for every watch that was pruned.
- * The array is allocated under ctx. */
-const char **bwatch_prune_watches_added_at_or_after(const tal_t *ctx,
-						    struct command *cmd,
-						    struct bwatch *bwatch,
-						    u32 min_start_block);
 
 #endif /* LIGHTNING_PLUGINS_BWATCH_BWATCH_STORE_H */

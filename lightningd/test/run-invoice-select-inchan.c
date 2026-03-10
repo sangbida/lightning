@@ -548,8 +548,7 @@ void onchaind_funding_spent(struct channel *channel UNNEEDED,
 			    u32 blockheight UNNEEDED)
 { fprintf(stderr, "onchaind_funding_spent called!\n"); abort(); }
 /* Generated stub for onchaind_send_depth_updates */
-void onchaind_send_depth_updates(struct channel *channel UNNEEDED,
-				 u32 blockheight UNNEEDED)
+void onchaind_send_depth_updates(struct channel *channel UNNEEDED, u32 blockheight UNNEEDED)
 { fprintf(stderr, "onchaind_send_depth_updates called!\n"); abort(); }
 /* Generated stub for param_index */
 struct command_result *param_index(struct command *cmd UNNEEDED, const char *name UNNEEDED,
@@ -726,9 +725,15 @@ void wallet_save_network_event(struct lightningd *ld UNNEEDED,
 /* Generated stub for wallet_total_forward_fees */
 struct amount_msat wallet_total_forward_fees(struct wallet *w UNNEEDED)
 { fprintf(stderr, "wallet_total_forward_fees called!\n"); abort(); }
-/* Generated stub for wallet_transaction_height */
-u32 wallet_transaction_height(struct wallet *w UNNEEDED, const struct bitcoin_txid *txid UNNEEDED)
-{ fprintf(stderr, "wallet_transaction_height called!\n"); abort(); }
+/* Generated stub for wallet_transaction_add */
+void wallet_transaction_add(struct wallet *w UNNEEDED, const struct wally_tx *tx UNNEEDED,
+			    u32 blockheight UNNEEDED, u32 txindex UNNEEDED)
+{ fprintf(stderr, "wallet_transaction_add called!\n"); abort(); }
+/* Generated stub for watchman_unwatch_blockdepth */
+void watchman_unwatch_blockdepth(struct lightningd *ld UNNEEDED,
+				 const char *owner UNNEEDED,
+				 u32 confirm_height UNNEEDED)
+{ fprintf(stderr, "watchman_unwatch_blockdepth called!\n"); abort(); }
 /* Generated stub for watchman_unwatch_outpoint */
 void watchman_unwatch_outpoint(struct lightningd *ld UNNEEDED,
 			       const char *owner UNNEEDED,
@@ -739,6 +744,11 @@ void watchman_unwatch_txid(struct lightningd *ld UNNEEDED,
 			   const char *owner UNNEEDED,
 			   const struct bitcoin_txid *txid UNNEEDED)
 { fprintf(stderr, "watchman_unwatch_txid called!\n"); abort(); }
+/* Generated stub for watchman_watch_blockdepth */
+void watchman_watch_blockdepth(struct lightningd *ld UNNEEDED,
+			       const char *owner UNNEEDED,
+			       u32 confirm_height UNNEEDED)
+{ fprintf(stderr, "watchman_watch_blockdepth called!\n"); abort(); }
 /* Generated stub for watchman_watch_outpoint */
 void watchman_watch_outpoint(struct lightningd *ld UNNEEDED,
 			     const char *owner UNNEEDED,

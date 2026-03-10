@@ -12,6 +12,9 @@ int unused_main(int argc, char *argv[]);
 /* Generated stub for bip86_pubkey */
 void bip86_pubkey(struct lightningd *ld UNNEEDED, struct pubkey *pubkey UNNEEDED, u32 index UNNEEDED)
 { fprintf(stderr, "bip86_pubkey called!\n"); abort(); }
+/* Generated stub for bitcoind_check_commands */
+void bitcoind_check_commands(struct bitcoind *bitcoind UNNEEDED)
+{ fprintf(stderr, "bitcoind_check_commands called!\n"); abort(); }
 /* Generated stub for channel_gossip_notify_new_block */
 void channel_gossip_notify_new_block(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "channel_gossip_notify_new_block called!\n"); abort(); }
@@ -67,6 +70,9 @@ void free_htlcs(struct lightningd *ld UNNEEDED, const struct channel *channel UN
 /* Generated stub for fromwire_hsmd_ecdh_resp */
 bool fromwire_hsmd_ecdh_resp(const void *p UNNEEDED, struct secret *ss UNNEEDED)
 { fprintf(stderr, "fromwire_hsmd_ecdh_resp called!\n"); abort(); }
+/* Generated stub for get_block_height */
+u32 get_block_height(struct lightningd *ld UNNEEDED)
+{ fprintf(stderr, "get_block_height called!\n"); abort(); }
 /* Generated stub for gossip_init */
 void gossip_init(struct lightningd *ld UNNEEDED, int connectd_fd UNNEEDED)
 { fprintf(stderr, "gossip_init called!\n"); abort(); }
@@ -141,6 +147,11 @@ bool log_status_msg(struct logger *log UNNEEDED,
  		    const struct node_id *node_id UNNEEDED,
 		    const u8 *msg UNNEEDED)
 { fprintf(stderr, "log_status_msg called!\n"); abort(); }
+/* Generated stub for new_bitcoind */
+struct bitcoind *new_bitcoind(const tal_t *ctx UNNEEDED,
+			      struct lightningd *ld UNNEEDED,
+			      struct logger *log UNNEEDED)
+{ fprintf(stderr, "new_bitcoind called!\n"); abort(); }
 /* Generated stub for new_log_book */
 struct log_book *new_log_book(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "new_log_book called!\n"); abort(); }
@@ -198,7 +209,9 @@ void setup_peers(struct lightningd *ld UNNEEDED)
 /* Generated stub for shutdown_plugins */
 void shutdown_plugins(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "shutdown_plugins called!\n"); abort(); }
-
+/* Generated stub for start_fee_polling */
+void start_fee_polling(struct lightningd *ld UNNEEDED)
+{ fprintf(stderr, "start_fee_polling called!\n"); abort(); }
 /* Generated stub for towire_hsmd_ecdh_req */
 u8 *towire_hsmd_ecdh_req(const tal_t *ctx UNNEEDED, const struct pubkey *point UNNEEDED)
 { fprintf(stderr, "towire_hsmd_ecdh_req called!\n"); abort(); }
@@ -231,9 +244,6 @@ struct wallet *wallet_new(struct lightningd *ld UNNEEDED, struct timers *timers 
 /* Generated stub for wallet_sanity_check */
 bool wallet_sanity_check(struct wallet *w UNNEEDED)
 { fprintf(stderr, "wallet_sanity_check called!\n"); abort(); }
-/* Generated stub for get_block_height */
-u32 get_block_height(struct lightningd *ld UNNEEDED)
-{ fprintf(stderr, "get_block_height called!\n"); abort(); }
 /* Generated stub for watchman_new */
 struct watchman *watchman_new(const tal_t *ctx UNNEEDED, struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "watchman_new called!\n"); abort(); }

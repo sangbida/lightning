@@ -19,4 +19,10 @@ void bwatch_check_scid_watches(struct command *cmd,
 			       u32 blockheight,
 			       const struct watch *w);
 
+/* Fire depth notifications for all blockdepth watches at new_height.
+ * Call after every new block and after every reorg tip removal. */
+void bwatch_check_blockdepth_watches(struct command *cmd,
+				     struct bwatch *bwatch,
+				     u32 new_height);
+
 #endif /* LIGHTNING_PLUGINS_BWATCH_BWATCH_SCANNER_H */

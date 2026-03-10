@@ -13,13 +13,15 @@ struct scriptpubkey_watches;
 struct outpoint_watches;
 struct txid_watches;
 struct scid_watches;
+struct blockdepth_watches;
 
 /* Watch type enumeration */
 enum watch_type {
 	WATCH_SCRIPTPUBKEY,
 	WATCH_OUTPOINT,
 	WATCH_TXID,
-	WATCH_SCID
+	WATCH_SCID,
+	WATCH_BLOCKDEPTH,
 };
 
 /* Scriptpubkey wrapper for easier handling */
@@ -53,6 +55,7 @@ struct bwatch {
 	struct outpoint_watches *outpoint_watches;
 	struct txid_watches *txid_watches;
 	struct scid_watches *scid_watches;
+	struct blockdepth_watches *blockdepth_watches;
 
 	/* Polling */
 	u32 poll_interval_ms;  /* Milliseconds between chain polls */

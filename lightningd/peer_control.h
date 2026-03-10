@@ -196,6 +196,18 @@ void channel_funding_spent_watch_found(struct lightningd *ld,
 				       u32 blockheight,
 				       u32 txindex);
 
+/** bwatch depth handler: "channel/funding_depth/<dbid>" — fires each block with confirmation depth. */
+void channel_funding_depth_found(struct lightningd *ld,
+				 const char *suffix,
+				 u32 depth,
+				 u32 blockheight);
+
+/** bwatch revert handler: "channel/funding_depth/<dbid>" — confirming block reorged away. */
+void channel_funding_depth_revert(struct lightningd *ld,
+				  const char *suffix,
+				  u32 blockheight);
+
+
 /**
  * channel_block_processed - Drive funding depth on every new block.
  *

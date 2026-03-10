@@ -129,9 +129,9 @@ u64 forward_index_update_status(struct lightningd *ld UNNEEDED,
 /* Generated stub for fromwire_hsmd_get_channel_basepoints_reply */
 bool fromwire_hsmd_get_channel_basepoints_reply(const void *p UNNEEDED, struct basepoints *basepoints UNNEEDED, struct pubkey *funding_pubkey UNNEEDED)
 { fprintf(stderr, "fromwire_hsmd_get_channel_basepoints_reply called!\n"); abort(); }
-/* Generated stub for fromwire_hsmd_get_output_scriptpubkey_reply */
-bool fromwire_hsmd_get_output_scriptpubkey_reply(const tal_t *ctx UNNEEDED, const void *p UNNEEDED, u8 **script UNNEEDED)
-{ fprintf(stderr, "fromwire_hsmd_get_output_scriptpubkey_reply called!\n"); abort(); }
+/* Generated stub for get_block_height */
+u32 get_block_height(struct lightningd *ld UNNEEDED)
+{ fprintf(stderr, "get_block_height called!\n"); abort(); }
 /* Generated stub for get_channel_basepoints */
 void get_channel_basepoints(struct lightningd *ld UNNEEDED,
 			    const struct node_id *peer_id UNNEEDED,
@@ -364,9 +364,6 @@ u64 sendpay_index_update_status(struct lightningd *ld UNNEEDED,
 /* Generated stub for towire_hsmd_get_channel_basepoints */
 u8 *towire_hsmd_get_channel_basepoints(const tal_t *ctx UNNEEDED, const struct node_id *peerid UNNEEDED, u64 dbid UNNEEDED)
 { fprintf(stderr, "towire_hsmd_get_channel_basepoints called!\n"); abort(); }
-/* Generated stub for towire_hsmd_get_output_scriptpubkey */
-u8 *towire_hsmd_get_output_scriptpubkey(const tal_t *ctx UNNEEDED, u64 channel_id UNNEEDED, const struct node_id *peer_id UNNEEDED, const struct pubkey *commitment_point UNNEEDED)
-{ fprintf(stderr, "towire_hsmd_get_output_scriptpubkey called!\n"); abort(); }
 /* Generated stub for wait_index_increment */
 u64  wait_index_increment(struct lightningd *ld UNNEEDED,
 				       struct db *db UNNEEDED,
@@ -380,9 +377,12 @@ const char *wait_index_name(enum wait_index index UNNEEDED)
 /* Generated stub for wait_subsystem_name */
 const char *wait_subsystem_name(enum wait_subsystem subsystem UNNEEDED)
 { fprintf(stderr, "wait_subsystem_name called!\n"); abort(); }
-/* Generated stub for get_block_height */
-u32 get_block_height(struct lightningd *ld UNNEEDED)
-{ fprintf(stderr, "get_block_height called!\n"); abort(); }
+/* Generated stub for watchman_watch_outpoint */
+void watchman_watch_outpoint(struct lightningd *ld UNNEEDED,
+			     const char *owner UNNEEDED,
+			     const struct bitcoin_outpoint *outpoint UNNEEDED,
+			     u32 start_block UNNEEDED)
+{ fprintf(stderr, "watchman_watch_outpoint called!\n"); abort(); }
 /* Generated stub for watchman_watch_scriptpubkey */
 void watchman_watch_scriptpubkey(struct lightningd *ld UNNEEDED,
 				 const char *owner UNNEEDED,

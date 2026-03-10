@@ -212,6 +212,7 @@ static void maybe_fire_scid_watch(struct command *cmd,
 	for (size_t i = 0; i < tal_count(w->owners); i++)
 		bwatch_add_watch(cmd, bwatch,
 				 WATCH_OUTPOINT, &outpoint, NULL, NULL, NULL,
+				 NULL,
 				 blockheight, w->owners[i]);
 }
 
@@ -268,6 +269,10 @@ static void check_tx_for_single_watch(struct command *cmd,
 		 * handles them directly at the block level (called after this loop
 		 * in bwatch_process_block_txs, including during rescan). */
 		break;
+	case WATCH_BLOCKDEPTH:
+		/* Blockdepth watches fire per block, not per transaction.
+		 * bwatch_check_blockdepth_watches handles them after bwatch_process_block_txs. */
+		break;
 	}
 }
 
@@ -292,4 +297,29 @@ void bwatch_process_block_txs(struct command *cmd,
 
 	/* Check scid watches for this block (async getutxout) */
 	bwatch_check_scid_watches(cmd, bwatch, block, blockheight, w);
+}
+
+/* Fire depth notifications for every active blockdepth watch.
+ * Called once per new block, only on the happy path (never during a reorg).
+ *
+ * A watch with start_block > new_height is stale: its confirming block was
+ * reorged away, watch_revert has been sent, but the del hasn't arrived yet.
+ * Skip it until deletion clears it from the table.
+ */
+void bwatch_check_blockdepth_watches(struct command *cmd,
+				     struct bwatch *bwatch,
+				     u32 new_height)
+{
+	struct blockdepth_watches_iter it;
+	struct watch *w;
+
+	for (w = blockdepth_watches_first(bwatch->blockdepth_watches, &it);
+	     w;
+	     w = blockdepth_watches_next(bwatch->blockdepth_watches, &it)) {
+		if (w->start_block > new_height)
+			continue; /* stale — awaiting deletion */
+
+		u32 depth = new_height - w->start_block + 1;
+		bwatch_send_blockdepth_found(cmd, w, depth, new_height);
+	}
 }

@@ -31,4 +31,26 @@ void onchaind_output_watch_found(struct lightningd *ld,
 /** Send current confirmation depths for all onchaind-tracked txs (per block). */
 void onchaind_send_depth_updates(struct channel *channel, u32 blockheight);
 
+/** bwatch depth handler: "onchaind/csv/<dbid>" — fires each block with CSV-locked output depth. */
+void onchaind_csv_depth_found(struct lightningd *ld,
+			      const char *suffix,
+			      u32 depth,
+			      u32 blockheight);
+
+/** bwatch revert handler: "onchaind/csv/<dbid>" — confirming block reorged away. */
+void onchaind_csv_depth_revert(struct lightningd *ld,
+			       const char *suffix,
+			       u32 blockheight);
+
+/** bwatch depth handler: "onchaind/htlc_depth/<dbid>" — fires each block with HTLC output depth. */
+void onchaind_htlc_depth_found(struct lightningd *ld,
+			       const char *suffix,
+			       u32 depth,
+			       u32 blockheight);
+
+/** bwatch revert handler: "onchaind/htlc_depth/<dbid>" — confirming block reorged away. */
+void onchaind_htlc_depth_revert(struct lightningd *ld,
+				const char *suffix,
+				u32 blockheight);
+
 #endif /* LIGHTNING_LIGHTNINGD_ONCHAIN_CONTROL_H */

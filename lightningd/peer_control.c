@@ -30,6 +30,7 @@
 #include <lightningd/onchain_control.h>
 #include <lightningd/broadcast.h>
 #include <lightningd/feerate.h>
+#include <common/gossip_constants.h>
 #include <lightningd/watchman.h>
 #include <lightningd/opening_common.h>
 #include <lightningd/opening_control.h>
@@ -2613,6 +2614,13 @@ void channel_funding_watch_found(struct lightningd *ld,
 				owner_channel_funding_spent(tmpctx, dbid),
 				&channel->funding,
 				blockheight);
+
+	/* Register a per-block depth watch so channel_funding_depth_found
+	 * drives channeld's lock-in state machine without needing
+	 * channel_block_processed to iterate every channel every block. */
+	watchman_watch_blockdepth(ld,
+				  owner_channel_funding_depth(tmpctx, dbid),
+				  blockheight);
 }
 
 void channel_funding_spent_watch_found(struct lightningd *ld,
@@ -3966,3 +3974,82 @@ void peer_dev_memleak(struct lightningd *ld, struct leak_detect *leaks)
 		}
 	}
 }
+
+/*
+ * channel/funding_depth/<dbid>
+ *
+ * Fires every block while the funding tx is accumulating confirmations.
+ * Drives channeld's depth state machine and initiates lock-in when both
+ * minimum_depth and the remote channel_ready have arrived.
+ * Unwatches once depth reaches max(minimum_depth, ANNOUNCE_MIN_DEPTH) — at
+ * that point channeld has everything it needs and further depth updates are
+ * handled by the existing channel_block_processed loop for CHANNELD_NORMAL.
+ *
+ * Guard: channel_block_processed also updates channel->depth every block.
+ * Whichever path fires first sets channel->depth; the other sees the same
+ * value and skips, preventing duplicate channeld messages.
+ */
+void channel_funding_depth_found(struct lightningd *ld,
+				 const char *suffix,
+				 u32 depth,
+				 u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+	u32 confirm_height, stop_depth;
+
+	if (!channel) {
+		log_debug(ld->log,
+			  "channel/funding_depth: unknown dbid %"PRIu64", ignoring",
+			  dbid);
+		return;
+	}
+
+	/* channel_block_processed may have already handled this depth. */
+	if (depth == channel->depth)
+		return;
+
+	channel->depth = depth;
+	log_debug(channel->log,
+		  "channel/funding_depth: depth %u at block %u (state %s)",
+		  depth, blockheight, channel_state_name(channel));
+
+	switch (channel->state) {
+	case CHANNELD_AWAITING_LOCKIN:
+		channeld_tell_depth(channel, &channel->funding.txid, depth);
+		if (depth >= channel->minimum_depth && channel->remote_channel_ready)
+			lockin_complete(channel, CHANNELD_AWAITING_LOCKIN);
+		break;
+	case CHANNELD_NORMAL:
+		channeld_tell_depth(channel, &channel->funding.txid, depth);
+		break;
+	default:
+		/* DUALOPEND_AWAITING_LOCKIN, CHANNELD_AWAITING_SPLICE, ONCHAIN,
+		 * etc. are driven by their own watches or channel_block_processed. */
+		break;
+	}
+
+	/* Stop once both lock-in and announce thresholds are satisfied. */
+	stop_depth = (channel->minimum_depth > ANNOUNCE_MIN_DEPTH)
+		     ? channel->minimum_depth : ANNOUNCE_MIN_DEPTH;
+	if (depth >= stop_depth) {
+		confirm_height = blockheight - depth + 1;
+		watchman_unwatch_blockdepth(ld,
+					    owner_channel_funding_depth(tmpctx, dbid),
+					    confirm_height);
+	}
+}
+
+/* Blockdepth revert handler: the confirming block was reorged away.
+ * Remove the watch; the scriptpubkey watch will re-fire if the tx is
+ * re-mined, at which point a fresh blockdepth watch is re-registered. */
+void channel_funding_depth_revert(struct lightningd *ld,
+				  const char *suffix,
+				  u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	watchman_unwatch_blockdepth(ld,
+				    owner_channel_funding_depth(tmpctx, dbid),
+				    blockheight);
+}
+

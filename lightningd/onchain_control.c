@@ -221,6 +221,17 @@ static void bwatch_register_tx(struct channel *channel,
 
 	for (outpoint.n = 0; outpoint.n < tx->wtx->num_outputs; outpoint.n++)
 		watchman_watch_outpoint(ld, owner_out, &outpoint, blockheight);
+
+	/* Register depth watches so onchaind_csv_depth_found /
+	 * onchaind_htlc_depth_found drive onchaind's maturity checks per block.
+	 * Unwatched on reorg via the revert handlers, and explicitly on
+	 * irrevocable resolution in handle_irrevocably_resolved. */
+	watchman_watch_blockdepth(ld,
+				  owner_onchaind_csv(tmpctx, channel->dbid),
+				  blockheight);
+	watchman_watch_blockdepth(ld,
+				  owner_onchaind_htlc_depth(tmpctx, channel->dbid),
+				  blockheight);
 }
 
 static void onchaind_spent_reply(struct subd *onchaind, const u8 *msg,
@@ -504,8 +515,28 @@ static void handle_onchain_htlc_timeout(struct channel *channel, const u8 *msg)
 
 static void handle_irrevocably_resolved(struct channel *channel, const u8 *msg UNUSED)
 {
+	struct lightningd *ld = channel->peer->ld;
+	struct onchaind_tx_map_iter it;
+	struct onchaind_watched_tx *entry;
+
+	/* Remove the onchaind/csv and onchaind/htlc_depth blockdepth watches.
+	 * We reuse onchaind_watches here only to recover the blockheight each
+	 * watch was registered with — the txid/outpoint watches themselves were
+	 * already removed incrementally by onchaind_spent_reply as each tx was
+	 * resolved. */
+	for (entry = onchaind_tx_map_first(channel->onchaind_watches, &it);
+	     entry;
+	     entry = onchaind_tx_map_next(channel->onchaind_watches, &it)) {
+		watchman_unwatch_blockdepth(ld,
+					    owner_onchaind_csv(tmpctx, channel->dbid),
+					    entry->blockheight);
+		watchman_unwatch_blockdepth(ld,
+					    owner_onchaind_htlc_depth(tmpctx, channel->dbid),
+					    entry->blockheight);
+	}
+
 	/* FIXME: Implement check_htlcs to ensure no dangling hout->in ptrs! */
-	free_htlcs(channel->peer->ld, channel);
+	free_htlcs(ld, channel);
 
 	log_info(channel->log, "onchaind complete, forgetting peer");
 
@@ -1881,4 +1912,60 @@ void onchaind_restart_closed_channels(struct lightningd *ld)
 		}
 	}
 	db_commit_transaction(ld->wallet->db);
+}
+
+/*
+ * onchaind/csv/<dbid>  and  onchaind/htlc_depth/<dbid>
+ *
+ * Fire onchaind_send_depth_updates each block so onchaind can check maturity
+ * thresholds.  Registered in bwatch_register_tx when a resolution tx confirms;
+ * removed on reorg via the revert handlers, and on full resolution in
+ * handle_irrevocably_resolved.
+ */
+void onchaind_csv_depth_found(struct lightningd *ld,
+			      const char *suffix,
+			      u32 depth UNUSED,
+			      u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+
+	if (!channel || !channel->owner)
+		return;
+
+	onchaind_send_depth_updates(channel, blockheight);
+}
+
+void onchaind_csv_depth_revert(struct lightningd *ld,
+			       const char *suffix,
+			       u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	watchman_unwatch_blockdepth(ld,
+				    owner_onchaind_csv(tmpctx, dbid),
+				    blockheight);
+}
+
+void onchaind_htlc_depth_found(struct lightningd *ld,
+			       const char *suffix,
+			       u32 depth UNUSED,
+			       u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+
+	if (!channel || !channel->owner)
+		return;
+
+	onchaind_send_depth_updates(channel, blockheight);
+}
+
+void onchaind_htlc_depth_revert(struct lightningd *ld,
+				const char *suffix,
+				u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	watchman_unwatch_blockdepth(ld,
+				    owner_onchaind_htlc_depth(tmpctx, dbid),
+				    blockheight);
 }

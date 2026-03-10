@@ -12,6 +12,12 @@ void bwatch_send_watch_found(struct command *cmd,
 			     u32 txindex,
 			     u32 index);
 
+/* Send blockdepth depth notification to lightningd (no tx, just depth + height) */
+void bwatch_send_blockdepth_found(struct command *cmd,
+				  const struct watch *w,
+				  u32 depth,
+				  u32 blockheight);
+
 void bwatch_send_watch_revert(struct command *cmd,
 			      const char *owner,
 			      u32 blockheight);
@@ -32,13 +38,17 @@ void bwatch_send_revert_block_processed(struct command *cmd, u32 new_height,
 struct command_result *bwatch_sync_with_watchman(struct command *cmd, void *unused);
 
 /* RPC command handlers (called by plugin_main) */
-struct command_result *json_bwatch_add(struct command *cmd,
-				       const char *buffer,
-				       const jsmntok_t *params);
+struct command_result *json_bwatch_add_scriptpubkey(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_add_outpoint(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_add_txid(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_add_scid(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_add_blockdepth(struct command *cmd, const char *buffer, const jsmntok_t *params);
 
-struct command_result *json_bwatch_del(struct command *cmd,
-				       const char *buffer,
-				       const jsmntok_t *params);
+struct command_result *json_bwatch_del_scriptpubkey(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_del_outpoint(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_del_txid(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_del_scid(struct command *cmd, const char *buffer, const jsmntok_t *params);
+struct command_result *json_bwatch_del_blockdepth(struct command *cmd, const char *buffer, const jsmntok_t *params);
 
 struct command_result *json_bwatch_list(struct command *cmd,
 					const char *buffer,

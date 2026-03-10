@@ -22,6 +22,8 @@ subtypedata,watch_wire,txid,bitcoin_txid,
 subtypedata,watch_wire,scid_blockheight,u32,
 subtypedata,watch_wire,scid_txindex,u32,
 subtypedata,watch_wire,scid_outnum,u32,
+# Blockdepth key (for WATCH_BLOCKDEPTH): block where the tx confirmed
+subtypedata,watch_wire,blockdepth,u32,
 # Common fields
 subtypedata,watch_wire,start_block,u32,
 subtypedata,watch_wire,num_owners,u16,
