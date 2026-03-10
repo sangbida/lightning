@@ -411,19 +411,32 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 	/* In cooperative mode we closed the right outpoint, but there may be
 	 * other live inflights (dual-fund RBF candidates, splice inflights).
 	 * If any of those confirm unexpectedly the funds are locked in a 2-of-2
-	 * nobody is closing — register a WATCH_TXID for each so bwatch tells us
-	 * if one appears on-chain.  channel_rogue_inflight_watch_found then
-	 * promotes it to the real funding and hands it to onchaind for recovery.
-	 * All watches share the same owner; the handler disambiguates via txid. */
+	 * nobody is closing — register a WATCH_SCRIPTPUBKEY for each so bwatch
+	 * tells us if one appears on-chain.  channel_rogue_inflight_watch_found
+	 * then promotes it to the real funding and hands it to onchaind for
+	 * recovery.  All watches share the same owner; the handler disambiguates
+	 * via txid. */
 	if (cooperative) {
 		list_for_each(&channel->inflights, inflight, list) {
+			const struct pubkey *remote_key;
+			const u8 *wscript, *scriptpubkey;
+
 			if (bitcoin_outpoint_eq(&inflight->funding->outpoint,
 						&channel->funding))
 				continue;
-		watchman_watch_txid(ld,
-			owner_channel_rogue_inflight(tmpctx, channel->dbid),
-			&inflight->funding->outpoint.txid,
-			get_block_height(ld));
+
+			/* Splice inflights use a different remote funding key. */
+			remote_key = inflight->funding->splice_remote_funding
+				? inflight->funding->splice_remote_funding
+				: &channel->channel_info.remote_fundingkey;
+			wscript = bitcoin_redeem_2of2(tmpctx,
+						     &channel->local_funding_pubkey,
+						     remote_key);
+			scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
+			watchman_watch_scriptpubkey(ld,
+				owner_channel_rogue_inflight(tmpctx, channel->dbid),
+				scriptpubkey, tal_count(scriptpubkey),
+				get_block_height(ld));
 		}
 	}
 }
@@ -2407,16 +2420,29 @@ void channel_rogue_inflight_watch_found(struct lightningd *ld,
 
 	owner = owner_channel_rogue_inflight(tmpctx, channel->dbid);
 
-	/* Cancel watches for all other inflights — one of them just won,
-	 * the others are irrelevant. */
+	/* Cancel WATCH_SCRIPTPUBKEY for all other inflights — one confirmed,
+	 * the rest are irrelevant.  Derive the scriptpubkey the same way
+	 * drop_to_chain registered it. */
 	list_for_each(&channel->inflights, other, list) {
+		const struct pubkey *remote_key;
+		const u8 *wscript, *scriptpubkey;
+
 		if (other == inflight)
 			continue;
 		if (bitcoin_outpoint_eq(&other->funding->outpoint,
 					&channel->funding))
 			continue;
-		watchman_unwatch_txid(ld, owner,
-				      &other->funding->outpoint.txid);
+
+		remote_key = other->funding->splice_remote_funding
+			? other->funding->splice_remote_funding
+			: &channel->channel_info.remote_fundingkey;
+		wscript = bitcoin_redeem_2of2(tmpctx,
+					      &channel->local_funding_pubkey,
+					      remote_key);
+		scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
+		watchman_unwatch_scriptpubkey(ld, owner,
+					      scriptpubkey,
+					      tal_count(scriptpubkey));
 	}
 
 	/* Promote this inflight to the channel's actual funding so onchaind
@@ -2446,9 +2472,31 @@ void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
  * watching the old outpoint and we can re-add it for the new one. */
 void channel_unwatch_funding(struct lightningd *ld, struct channel *channel)
 {
-	watchman_unwatch_outpoint(ld,
-				  owner_channel_funding_spent(tmpctx, channel->dbid),
-				  &channel->funding);
+	u8 *wscript, *scriptpubkey;
+
+	/* Stub channels have no watches. */
+	if (channel->scid && is_stub_scid(*channel->scid))
+		return;
+
+	wscript = bitcoin_redeem_2of2(tmpctx,
+				      &channel->local_funding_pubkey,
+				      &channel->channel_info.remote_fundingkey);
+	scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
+
+	if (!channel->scid) {
+		/* Funding not yet on-chain: the scriptpubkey watch is active. */
+		watchman_unwatch_scriptpubkey(ld,
+					      owner_channel_funding(tmpctx, channel->dbid),
+					      scriptpubkey, tal_count(scriptpubkey));
+	} else {
+		/* Funding confirmed: unwatch the spend outpoint and depth. */
+		watchman_unwatch_outpoint(ld,
+					  owner_channel_funding_spent(tmpctx, channel->dbid),
+					  &channel->funding);
+		watchman_unwatch_blockdepth(ld,
+					    owner_channel_funding_depth(tmpctx, channel->dbid),
+					    short_channel_id_blocknum(*channel->scid));
+	}
 }
 
 void channel_watch_funding(struct lightningd *ld, struct channel *channel)

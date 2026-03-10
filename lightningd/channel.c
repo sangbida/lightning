@@ -16,6 +16,7 @@
 #include <lightningd/notification.h>
 #include <lightningd/opening_common.h>
 #include <lightningd/subd.h>
+#include <lightningd/peer_control.h>
 #include <lightningd/watchman.h>
 #include <wallet/wallet.h>
 
@@ -92,6 +93,9 @@ void delete_channel(struct channel *channel STEALS,
 	const u8 *msg;
 	struct peer *peer = channel->peer;
 	struct lightningd *ld = peer->ld;
+
+	/* Unwatch all funding-related bwatch registrations for this channel. */
+	channel_unwatch_funding(ld, channel);
 
 	if (channel->dbid != 0) {
 		wallet_channel_close(ld->wallet, channel);

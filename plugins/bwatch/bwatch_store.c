@@ -60,23 +60,6 @@ bool outpoint_watch_eq(const struct watch *w, const struct bitcoin_outpoint *out
 	return bitcoin_outpoint_eq(&w->key.outpoint, outpoint);
 }
 
-const struct bitcoin_txid *txid_watch_keyof(const struct watch *w)
-{
-	assert(w->type == WATCH_TXID);
-	return &w->key.txid;
-}
-
-size_t txid_hash(const struct bitcoin_txid *txid)
-{
-	return siphash24(siphash_seed(),
-			 txid->shad.sha.u.u8, sizeof(txid->shad.sha.u.u8));
-}
-
-bool txid_watch_eq(const struct watch *w, const struct bitcoin_txid *txid)
-{
-	return bitcoin_txid_eq(&w->key.txid, txid);
-}
-
 const struct short_channel_id *scid_watch_keyof(const struct watch *w)
 {
 	assert(w->type == WATCH_SCID);
@@ -267,8 +250,6 @@ const char *bwatch_get_watch_type_name(enum watch_type type)
 		return "scriptpubkey";
 	case WATCH_OUTPOINT:
 		return "outpoint";
-	case WATCH_TXID:
-		return "txid";
 	case WATCH_SCID:
 		return "scid";
 	case WATCH_BLOCKDEPTH:
@@ -289,9 +270,6 @@ static const char **get_watch_datastore_key(const tal_t *ctx, const struct watch
 	case WATCH_OUTPOINT:
 		return mkdatastorekey(ctx, "bwatch", type_name,
 				      take(fmt_bitcoin_outpoint(NULL, &w->key.outpoint)));
-	case WATCH_TXID:
-		return mkdatastorekey(ctx, "bwatch", type_name,
-				      take(fmt_bitcoin_txid(NULL, &w->key.txid)));
 	case WATCH_SCID:
 		return mkdatastorekey(ctx, "bwatch", type_name,
 				      take(fmt_short_channel_id(NULL, w->key.scid)));
@@ -311,7 +289,6 @@ static struct watch_wire *watch_to_wire(const tal_t *ctx, const struct watch *w)
 
 	wire->scriptpubkey = NULL;
 	memset(&wire->outpoint, 0, sizeof(wire->outpoint));
-	memset(&wire->txid, 0, sizeof(wire->txid));
 	wire->scid_blockheight = wire->scid_txindex = wire->scid_outnum = 0;
 	wire->blockdepth = 0;
 
@@ -321,9 +298,6 @@ static struct watch_wire *watch_to_wire(const tal_t *ctx, const struct watch *w)
 		break;
 	case WATCH_OUTPOINT:
 		wire->outpoint = w->key.outpoint;
-		break;
-	case WATCH_TXID:
-		wire->txid = w->key.txid;
 		break;
 	case WATCH_SCID:
 		wire->scid_blockheight = short_channel_id_blocknum(w->key.scid);
@@ -358,9 +332,6 @@ static struct watch *watch_from_wire(const tal_t *ctx, const struct watch_wire *
 	case WATCH_OUTPOINT:
 		w->key.outpoint = wire->outpoint;
 		break;
-	case WATCH_TXID:
-		w->key.txid = wire->txid;
-		break;
 	case WATCH_SCID:
 		if (!mk_short_channel_id(&w->key.scid,
 					 wire->scid_blockheight,
@@ -390,9 +361,6 @@ void bwatch_add_watch_to_hash(struct bwatch *bwatch, struct watch *w)
 	case WATCH_OUTPOINT:
 		outpoint_watches_add(bwatch->outpoint_watches, w);
 		break;
-	case WATCH_TXID:
-		txid_watches_add(bwatch->txid_watches, w);
-		break;
 	case WATCH_SCID:
 		scid_watches_add(bwatch->scid_watches, w);
 		break;
@@ -406,7 +374,6 @@ struct watch *bwatch_get_watch(struct bwatch *bwatch,
 			       enum watch_type type,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
-			       const struct bitcoin_txid *txid,
 			       const struct short_channel_id *scid,
 			       const u32 *confirm_height)
 {
@@ -420,8 +387,6 @@ struct watch *bwatch_get_watch(struct bwatch *bwatch,
 	}
 	case WATCH_OUTPOINT:
 		return outpoint_watches_get(bwatch->outpoint_watches, outpoint);
-	case WATCH_TXID:
-		return txid_watches_get(bwatch->txid_watches, txid);
 	case WATCH_SCID:
 		return scid_watches_get(bwatch->scid_watches, scid);
 	case WATCH_BLOCKDEPTH:
@@ -438,9 +403,6 @@ void bwatch_remove_watch_from_hash(struct bwatch *bwatch, struct watch *w)
 		return;
 	case WATCH_OUTPOINT:
 		outpoint_watches_del(bwatch->outpoint_watches, w);
-		return;
-	case WATCH_TXID:
-		txid_watches_del(bwatch->txid_watches, w);
 		return;
 	case WATCH_SCID:
 		scid_watches_del(bwatch->scid_watches, w);
@@ -529,7 +491,6 @@ void bwatch_load_watches_from_datastore(struct command *cmd, struct bwatch *bwat
 {
 	load_watches_by_type(cmd, bwatch, WATCH_SCRIPTPUBKEY);
 	load_watches_by_type(cmd, bwatch, WATCH_OUTPOINT);
-	load_watches_by_type(cmd, bwatch, WATCH_TXID);
 	load_watches_by_type(cmd, bwatch, WATCH_SCID);
 	load_watches_by_type(cmd, bwatch, WATCH_BLOCKDEPTH);
 }
@@ -546,13 +507,12 @@ struct watch *bwatch_add_watch(struct command *cmd,
 			       enum watch_type type,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
-			       const struct bitcoin_txid *txid,
 			       const struct short_channel_id *scid,
 			       const u32 *confirm_height,
 			       u32 start_block,
 			       const char *owner_id)
 {
-	struct watch *w = bwatch_get_watch(bwatch, type, outpoint, scriptpubkey, txid, scid,
+	struct watch *w = bwatch_get_watch(bwatch, type, outpoint, scriptpubkey, scid,
 					   confirm_height);
 
 	if (w) {
@@ -578,9 +538,6 @@ struct watch *bwatch_add_watch(struct command *cmd,
 	w->start_block = start_block;
 	w->owners = tal_arr(w, wirestring *, 0);
 	switch (w->type) {
-	case WATCH_TXID:
-		w->key.txid = *txid;
-		break;
 	case WATCH_SCRIPTPUBKEY:
 		w->key.scriptpubkey.len = tal_bytelen(scriptpubkey);
 		w->key.scriptpubkey.script = tal_dup_talarr(w, u8, scriptpubkey);
@@ -608,12 +565,11 @@ void bwatch_del_watch(struct command *cmd,
 		      enum watch_type type,
 		      const struct bitcoin_outpoint *outpoint,
 		      const u8 *scriptpubkey,
-		      const struct bitcoin_txid *txid,
 		      const struct short_channel_id *scid,
 		      const u32 *confirm_height,
 		      const char *owner_id)
 {
-	struct watch *w = bwatch_get_watch(bwatch, type, outpoint, scriptpubkey, txid, scid,
+	struct watch *w = bwatch_get_watch(bwatch, type, outpoint, scriptpubkey, scid,
 					   confirm_height);
 
 	if (!w) {

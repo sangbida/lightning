@@ -15,32 +15,6 @@
  * ============================================================================
  */
 
-/* Check all txid watches via hash lookup */
-static void check_txid_watches(struct command *cmd,
-			       struct bwatch *bwatch,
-			       const struct bitcoin_tx *tx,
-			       u32 blockheight,
-			       const struct bitcoin_blkid *blockhash,
-			       u32 txindex)
-{
-	struct bitcoin_txid txid;
-	struct watch *w;
-
-	bitcoin_txid(tx, &txid);
-	w = txid_watches_get(bwatch->txid_watches, &txid);
-	if (!w)
-		return;
-
-	if (blockheight < w->start_block) {
-		plugin_log(cmd->plugin, LOG_BROKEN,
-			   "Watch for txid %s on height >= %u found on block %u???",
-			   fmt_bitcoin_txid(tmpctx, &txid),
-			   w->start_block, blockheight);
-		return;
-	}
-	bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX);
-}
-
 /* Check all scriptpubkey watches via hash lookup */
 static void check_scriptpubkey_watches(struct command *cmd,
 				       struct bwatch *bwatch,
@@ -113,22 +87,8 @@ static void check_tx_against_all_watches(struct command *cmd,
 					 const struct bitcoin_blkid *blockhash,
 					 u32 txindex)
 {
-	check_txid_watches(cmd, bwatch, tx, blockheight, blockhash, txindex);
 	check_scriptpubkey_watches(cmd, bwatch, tx, blockheight, blockhash, txindex);
 	check_outpoint_watches(cmd, bwatch, tx, blockheight, blockhash, txindex);
-}
-
-/* Check tx against a specific txid */
-static void check_tx_txid(struct command *cmd,
-			  const struct bitcoin_tx *tx,
-			  const struct bitcoin_txid *tx_txid,
-			  const struct watch *w,
-			  u32 blockheight,
-			  const struct bitcoin_blkid *blockhash,
-			  u32 txindex)
-{
-	if (bitcoin_txid_eq(tx_txid, &w->key.txid))
-		bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, UINT32_MAX);
 }
 
 /* Check tx outputs against a specific scriptpubkey */
@@ -211,7 +171,7 @@ static void maybe_fire_scid_watch(struct command *cmd,
 	outpoint.n = outnum;
 	for (size_t i = 0; i < tal_count(w->owners); i++)
 		bwatch_add_watch(cmd, bwatch,
-				 WATCH_OUTPOINT, &outpoint, NULL, NULL, NULL,
+				 WATCH_OUTPOINT, &outpoint, NULL, NULL,
 				 NULL,
 				 blockheight, w->owners[i]);
 }
@@ -250,13 +210,7 @@ static void check_tx_for_single_watch(struct command *cmd,
 				      const struct bitcoin_blkid *blockhash,
 				      u32 txindex)
 {
-	struct bitcoin_txid txid;
-
 	switch (w->type) {
-	case WATCH_TXID:
-		bitcoin_txid(tx, &txid);
-		check_tx_txid(cmd, tx, &txid, w, blockheight, blockhash, txindex);
-		break;
 	case WATCH_SCRIPTPUBKEY:
 		check_tx_scriptpubkey(cmd, tx, w, blockheight, blockhash, txindex);
 		break;

@@ -11,7 +11,6 @@
 /* Forward declare hash table types (defined in bwatch_store.h) */
 struct scriptpubkey_watches;
 struct outpoint_watches;
-struct txid_watches;
 struct scid_watches;
 struct blockdepth_watches;
 
@@ -19,7 +18,6 @@ struct blockdepth_watches;
 enum watch_type {
 	WATCH_SCRIPTPUBKEY,
 	WATCH_OUTPOINT,
-	WATCH_TXID,
 	WATCH_SCID,
 	WATCH_BLOCKDEPTH,
 };
@@ -38,7 +36,6 @@ struct watch {
 	union {
 		struct scriptpubkey scriptpubkey;
 		struct bitcoin_outpoint outpoint;
-		struct bitcoin_txid txid;
 		struct short_channel_id scid;
 	} key;
 };
@@ -53,7 +50,6 @@ struct bwatch {
 	/* Watch hash tables (opaque pointers, defined in bwatch_store.h) */
 	struct scriptpubkey_watches *scriptpubkey_watches;
 	struct outpoint_watches *outpoint_watches;
-	struct txid_watches *txid_watches;
 	struct scid_watches *scid_watches;
 	struct blockdepth_watches *blockdepth_watches;
 

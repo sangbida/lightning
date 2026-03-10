@@ -132,16 +132,6 @@ static void bwatch_notify_reorg_watches(struct command *cmd,
 			tal_arr_expand(&owners, w->owners[i]);
 	}
 
-	struct txid_watches_iter tit;
-	for (w = txid_watches_first(bwatch->txid_watches, &tit);
-	     w;
-	     w = txid_watches_next(bwatch->txid_watches, &tit)) {
-		if (w->start_block < removed_height)
-			continue;
-		for (size_t i = 0; i < tal_count(w->owners); i++)
-			tal_arr_expand(&owners, w->owners[i]);
-	}
-
 	struct scid_watches_iter scit;
 	for (w = scid_watches_first(bwatch->scid_watches, &scit);
 	     w;
@@ -434,7 +424,6 @@ static const char *init(struct command *cmd,
 	/* Initialize watch storage */
 	bwatch->scriptpubkey_watches = new_htable(bwatch, scriptpubkey_watches);
 	bwatch->outpoint_watches = new_htable(bwatch, outpoint_watches);
-	bwatch->txid_watches = new_htable(bwatch, txid_watches);
 	bwatch->scid_watches = new_htable(bwatch, scid_watches);
 	bwatch->blockdepth_watches = new_htable(bwatch, blockdepth_watches);
 
@@ -462,12 +451,10 @@ static const char *init(struct command *cmd,
 static const struct plugin_command commands[] = {
 	{ "addscriptpubkeywatch", json_bwatch_add_scriptpubkey },
 	{ "addoutpointwatch",     json_bwatch_add_outpoint     },
-	{ "addtxidwatch",         json_bwatch_add_txid         },
 	{ "addscidwatch",         json_bwatch_add_scid         },
 	{ "addblockdepthwatch",   json_bwatch_add_blockdepth   },
 	{ "delscriptpubkeywatch", json_bwatch_del_scriptpubkey },
 	{ "deloutpointwatch",     json_bwatch_del_outpoint     },
-	{ "deltxidwatch",         json_bwatch_del_txid         },
 	{ "delscidwatch",         json_bwatch_del_scid         },
 	{ "delblockdepthwatch",   json_bwatch_del_blockdepth   },
 	{ "listwatch",            json_bwatch_list             },

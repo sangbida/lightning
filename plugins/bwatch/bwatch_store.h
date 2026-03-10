@@ -21,10 +21,6 @@ const struct bitcoin_outpoint *outpoint_watch_keyof(const struct watch *w);
 size_t outpoint_hash(const struct bitcoin_outpoint *outpoint);
 bool outpoint_watch_eq(const struct watch *w, const struct bitcoin_outpoint *outpoint);
 
-const struct bitcoin_txid *txid_watch_keyof(const struct watch *w);
-size_t txid_hash(const struct bitcoin_txid *txid);
-bool txid_watch_eq(const struct watch *w, const struct bitcoin_txid *txid);
-
 const struct short_channel_id *scid_watch_keyof(const struct watch *w);
 size_t scid_hash(const struct short_channel_id *scid);
 bool scid_watch_eq(const struct watch *w, const struct short_channel_id *scid);
@@ -41,10 +37,6 @@ HTABLE_DEFINE_NODUPS_TYPE(struct watch, scriptpubkey_watch_keyof,
 HTABLE_DEFINE_NODUPS_TYPE(struct watch, outpoint_watch_keyof,
 			  outpoint_hash, outpoint_watch_eq,
 			  outpoint_watches);
-
-HTABLE_DEFINE_NODUPS_TYPE(struct watch, txid_watch_keyof,
-			  txid_hash, txid_watch_eq,
-			  txid_watches);
 
 HTABLE_DEFINE_NODUPS_TYPE(struct watch, scid_watch_keyof,
 			  scid_hash, scid_watch_eq,
@@ -80,7 +72,6 @@ struct watch *bwatch_get_watch(struct bwatch *bwatch,
 			       enum watch_type type,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
-			       const struct bitcoin_txid *txid,
 			       const struct short_channel_id *scid,
 			       const u32 *confirm_height);
 void bwatch_remove_watch_from_hash(struct bwatch *bwatch, struct watch *w);
@@ -96,7 +87,6 @@ struct watch *bwatch_add_watch(struct command *cmd,
 			       enum watch_type type,
 			       const struct bitcoin_outpoint *outpoint,
 			       const u8 *scriptpubkey,
-			       const struct bitcoin_txid *txid,
 			       const struct short_channel_id *scid,
 			       const u32 *confirm_height,
 			       u32 start_block,
@@ -107,7 +97,6 @@ void bwatch_del_watch(struct command *cmd,
 		      enum watch_type type,
 		      const struct bitcoin_outpoint *outpoint,
 		      const u8 *scriptpubkey,
-		      const struct bitcoin_txid *txid,
 		      const struct short_channel_id *scid,
 		      const u32 *confirm_height,
 		      const char *owner_id);

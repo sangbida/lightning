@@ -99,6 +99,12 @@ void watchman_watch_scriptpubkey(struct lightningd *ld,
 				 size_t script_len,
 				 u32 start_block);
 
+/** Remove a WATCH_SCRIPTPUBKEY. */
+void watchman_unwatch_scriptpubkey(struct lightningd *ld,
+				   const char *owner,
+				   const u8 *scriptpubkey,
+				   size_t script_len);
+
 /** Register a WATCH_OUTPOINT — fires when the outpoint is spent. */
 void watchman_watch_outpoint(struct lightningd *ld,
 			     const char *owner,
@@ -109,18 +115,6 @@ void watchman_watch_outpoint(struct lightningd *ld,
 void watchman_unwatch_outpoint(struct lightningd *ld,
 			       const char *owner,
 			       const struct bitcoin_outpoint *outpoint);
-
-/** Register a WATCH_TXID — fires when a tx with that txid is confirmed.
- *  outnum and innum will both be UINT32_MAX in the handler. */
-void watchman_watch_txid(struct lightningd *ld,
-			 const char *owner,
-			 const struct bitcoin_txid *txid,
-			 u32 start_block);
-
-/** Remove a WATCH_TXID. */
-void watchman_unwatch_txid(struct lightningd *ld,
-			   const char *owner,
-			   const struct bitcoin_txid *txid);
 
 /** Register a WATCH_SCID — fires when bwatch finds the output (for gossip get_txout). */
 void watchman_watch_scid(struct lightningd *ld,
@@ -188,9 +182,6 @@ static inline const char *owner_channel_rogue_inflight(const tal_t *ctx, u64 dbi
 { return tal_fmt(ctx, "channel/rogue_inflight/%"PRIu64, dbid); }
 
 /* onchaind/ owners */
-static inline const char *owner_onchaind_txid(const tal_t *ctx, u64 dbid)
-{ return tal_fmt(ctx, "onchaind/txid/%"PRIu64, dbid); }
-
 static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid)
 { return tal_fmt(ctx, "onchaind/outpoint/%"PRIu64, dbid); }
 

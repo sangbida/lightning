@@ -16,8 +16,6 @@ subtypedata,watch_wire,scriptpubkey_len,u32,
 subtypedata,watch_wire,scriptpubkey,u8,scriptpubkey_len
 # Outpoint key (for WATCH_OUTPOINT)
 subtypedata,watch_wire,outpoint,bitcoin_outpoint,
-# Txid key (for WATCH_TXID)
-subtypedata,watch_wire,txid,bitcoin_txid,
 # SCID key (for WATCH_SCID)
 subtypedata,watch_wire,scid_blockheight,u32,
 subtypedata,watch_wire,scid_txindex,u32,

@@ -388,6 +388,16 @@ void watchman_watch_scriptpubkey(struct lightningd *ld,
 			     start_block));
 }
 
+void watchman_unwatch_scriptpubkey(struct lightningd *ld,
+				   const char *owner,
+				   const u8 *scriptpubkey,
+				   size_t script_len)
+{
+	watchman_del(ld, "delscriptpubkeywatch", owner,
+		     tal_fmt(tmpctx, "{\"scriptpubkey\":\"%s\"}",
+			     tal_hexstr(tmpctx, scriptpubkey, script_len)));
+}
+
 void watchman_watch_outpoint(struct lightningd *ld,
 			     const char *owner,
 			     const struct bitcoin_outpoint *outpoint,
@@ -407,25 +417,6 @@ void watchman_unwatch_outpoint(struct lightningd *ld,
 		     tal_fmt(tmpctx, "{\"outpoint\":\"%s:%u\"}",
 			     fmt_bitcoin_txid(tmpctx, &outpoint->txid),
 			     outpoint->n));
-}
-
-void watchman_watch_txid(struct lightningd *ld,
-			 const char *owner,
-			 const struct bitcoin_txid *txid,
-			 u32 start_block)
-{
-	watchman_add(ld, "addtxidwatch", owner,
-		     tal_fmt(tmpctx, "{\"txid\":\"%s\",\"start_block\":%u}",
-			     fmt_bitcoin_txid(tmpctx, txid), start_block));
-}
-
-void watchman_unwatch_txid(struct lightningd *ld,
-			   const char *owner,
-			   const struct bitcoin_txid *txid)
-{
-	watchman_del(ld, "deltxidwatch", owner,
-		     tal_fmt(tmpctx, "{\"txid\":\"%s\"}",
-			     fmt_bitcoin_txid(tmpctx, txid)));
 }
 
 void watchman_watch_scid(struct lightningd *ld,
@@ -488,9 +479,6 @@ static void channel_wrong_funding_spent_watch_revert(struct lightningd *ld UNUSE
 static void channel_rogue_inflight_watch_revert(struct lightningd *ld UNUSED,
 						const char *suffix UNUSED,
 						u32 blockheight UNUSED) {}
-static void onchaind_tx_watch_revert(struct lightningd *ld UNUSED,
-				     const char *suffix UNUSED,
-				     u32 blockheight UNUSED) {}
 static void onchaind_output_watch_revert(struct lightningd *ld UNUSED,
 					 const char *suffix UNUSED,
 					 u32 blockheight UNUSED) {}
@@ -530,10 +518,8 @@ static const struct watch_dispatch {
 	{ "channel/funding_spent/",       channel_funding_spent_watch_found,       channel_funding_spent_watch_revert       },
 	/* channel/wrong_funding_spent/<dbid>: WATCH_OUTPOINT, fires when shutdown_wrong_funding outpoint is spent */
 	{ "channel/wrong_funding_spent/", channel_wrong_funding_spent_watch_found, channel_wrong_funding_spent_watch_revert },
-	/* channel/rogue_inflight/<dbid>: WATCH_TXID, fires when a non-primary inflight tx confirms */
+	/* channel/rogue_inflight/<dbid>: WATCH_SCRIPTPUBKEY, fires when a non-primary inflight tx confirms */
 	{ "channel/rogue_inflight/",      channel_rogue_inflight_watch_found,      channel_rogue_inflight_watch_revert      },
-	/* onchaind/txid/<dbid>: WATCH_TXID, fires when any onchaind-tracked tx confirms */
-	{ "onchaind/txid/",               onchaind_tx_watch_found,                 onchaind_tx_watch_revert                 },
 	/* onchaind/outpoint/<dbid>: WATCH_OUTPOINT, fires when any onchaind-tracked output is spent */
 	{ "onchaind/outpoint/",           onchaind_output_watch_found,             onchaind_output_watch_revert             },
 	/* gossip/<scid>: WATCH_SCID, fires when a channel announcement UTXO is confirmed */

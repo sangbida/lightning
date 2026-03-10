@@ -310,7 +310,7 @@ struct command_result *json_bwatch_add_scriptpubkey(struct command *cmd,
 		return command_check_done(cmd);
 
 	w = bwatch_add_watch(cmd, bwatch, WATCH_SCRIPTPUBKEY,
-			     NULL, scriptpubkey, NULL, NULL, NULL,
+			     NULL, scriptpubkey, NULL, NULL,
 			     *start_block, owner);
 	return add_watch_and_maybe_rescan(cmd, bwatch, w, *start_block);
 }
@@ -336,33 +336,7 @@ struct command_result *json_bwatch_add_outpoint(struct command *cmd,
 		return command_check_done(cmd);
 
 	w = bwatch_add_watch(cmd, bwatch, WATCH_OUTPOINT,
-			     outpoint, NULL, NULL, NULL, NULL,
-			     *start_block, owner);
-	return add_watch_and_maybe_rescan(cmd, bwatch, w, *start_block);
-}
-
-struct command_result *json_bwatch_add_txid(struct command *cmd,
-					    const char *buffer,
-					    const jsmntok_t *params)
-{
-	struct bwatch *bwatch = bwatch_of(cmd->plugin);
-	const char *owner;
-	struct bitcoin_txid *txid;
-	u32 *start_block;
-	struct watch *w;
-
-	if (!param_check(cmd, buffer, params,
-			 p_req("owner", param_string, &owner),
-			 p_req("txid", param_txid, &txid),
-			 p_req("start_block", param_u32, &start_block),
-			 NULL))
-		return command_param_failed();
-
-	if (command_check_only(cmd))
-		return command_check_done(cmd);
-
-	w = bwatch_add_watch(cmd, bwatch, WATCH_TXID,
-			     NULL, NULL, txid, NULL, NULL,
+			     outpoint, NULL, NULL, NULL,
 			     *start_block, owner);
 	return add_watch_and_maybe_rescan(cmd, bwatch, w, *start_block);
 }
@@ -388,7 +362,7 @@ struct command_result *json_bwatch_add_scid(struct command *cmd,
 		return command_check_done(cmd);
 
 	w = bwatch_add_watch(cmd, bwatch, WATCH_SCID,
-			     NULL, NULL, NULL, scid, NULL,
+			     NULL, NULL, scid, NULL,
 			     *start_block, owner);
 	return add_watch_and_maybe_rescan(cmd, bwatch, w, *start_block);
 }
@@ -412,7 +386,7 @@ struct command_result *json_bwatch_add_blockdepth(struct command *cmd,
 		return command_check_done(cmd);
 
 	w = bwatch_add_watch(cmd, bwatch, WATCH_BLOCKDEPTH,
-			     NULL, NULL, NULL, NULL, start_block,
+			     NULL, NULL, NULL, start_block,
 			     *start_block, owner);
 	return add_watch_and_maybe_rescan(cmd, bwatch, w, *start_block);
 }
@@ -435,7 +409,7 @@ struct command_result *json_bwatch_del_scriptpubkey(struct command *cmd,
 		return command_check_done(cmd);
 
 	bwatch_del_watch(cmd, bwatch, WATCH_SCRIPTPUBKEY,
-			 NULL, scriptpubkey, NULL, NULL, NULL, owner);
+			 NULL, scriptpubkey, NULL, NULL, owner);
 	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
 }
 
@@ -457,29 +431,7 @@ struct command_result *json_bwatch_del_outpoint(struct command *cmd,
 		return command_check_done(cmd);
 
 	bwatch_del_watch(cmd, bwatch, WATCH_OUTPOINT,
-			 outpoint, NULL, NULL, NULL, NULL, owner);
-	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
-}
-
-struct command_result *json_bwatch_del_txid(struct command *cmd,
-					    const char *buffer,
-					    const jsmntok_t *params)
-{
-	struct bwatch *bwatch = bwatch_of(cmd->plugin);
-	const char *owner;
-	struct bitcoin_txid *txid;
-
-	if (!param_check(cmd, buffer, params,
-			 p_req("owner", param_string, &owner),
-			 p_req("txid", param_txid, &txid),
-			 NULL))
-		return command_param_failed();
-
-	if (command_check_only(cmd))
-		return command_check_done(cmd);
-
-	bwatch_del_watch(cmd, bwatch, WATCH_TXID,
-			 NULL, NULL, txid, NULL, NULL, owner);
+			 outpoint, NULL, NULL, NULL, owner);
 	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
 }
 
@@ -501,7 +453,7 @@ struct command_result *json_bwatch_del_scid(struct command *cmd,
 		return command_check_done(cmd);
 
 	bwatch_del_watch(cmd, bwatch, WATCH_SCID,
-			 NULL, NULL, NULL, scid, NULL, owner);
+			 NULL, NULL, scid, NULL, owner);
 	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
 }
 
@@ -523,7 +475,7 @@ struct command_result *json_bwatch_del_blockdepth(struct command *cmd,
 		return command_check_done(cmd);
 
 	bwatch_del_watch(cmd, bwatch, WATCH_BLOCKDEPTH,
-			 NULL, NULL, NULL, NULL, start_block, owner);
+			 NULL, NULL, NULL, start_block, owner);
 	return command_success(cmd, json_out_obj(cmd, "removed", "true"));
 }
 
@@ -552,7 +504,6 @@ struct command_result *json_bwatch_list(struct command *cmd,
 	struct watch *w;
 	struct scriptpubkey_watches_iter sit;
 	struct outpoint_watches_iter oit;
-	struct txid_watches_iter tit;
 	struct scid_watches_iter scit;
 	struct blockdepth_watches_iter bdit;
 
@@ -580,15 +531,6 @@ struct command_result *json_bwatch_list(struct command *cmd,
 		json_out_watch_common(jout, w->type, w->start_block, w->owners);
 		json_out_end(jout, '}');
 		w = outpoint_watches_next(bwatch->outpoint_watches, &oit);
-	}
-
-	w = txid_watches_first(bwatch->txid_watches, &tit);
-	while (w) {
-		json_out_start(jout, NULL, '{');
-		json_out_addstr(jout, "txid", fmt_bitcoin_txid(tmpctx, &w->key.txid));
-		json_out_watch_common(jout, w->type, w->start_block, w->owners);
-		json_out_end(jout, '}');
-		w = txid_watches_next(bwatch->txid_watches, &tit);
 	}
 
 	w = scid_watches_first(bwatch->scid_watches, &scit);

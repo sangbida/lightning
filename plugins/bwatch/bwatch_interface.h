@@ -40,13 +40,11 @@ struct command_result *bwatch_sync_with_watchman(struct command *cmd, void *unus
 /* RPC command handlers (called by plugin_main) */
 struct command_result *json_bwatch_add_scriptpubkey(struct command *cmd, const char *buffer, const jsmntok_t *params);
 struct command_result *json_bwatch_add_outpoint(struct command *cmd, const char *buffer, const jsmntok_t *params);
-struct command_result *json_bwatch_add_txid(struct command *cmd, const char *buffer, const jsmntok_t *params);
 struct command_result *json_bwatch_add_scid(struct command *cmd, const char *buffer, const jsmntok_t *params);
 struct command_result *json_bwatch_add_blockdepth(struct command *cmd, const char *buffer, const jsmntok_t *params);
 
 struct command_result *json_bwatch_del_scriptpubkey(struct command *cmd, const char *buffer, const jsmntok_t *params);
 struct command_result *json_bwatch_del_outpoint(struct command *cmd, const char *buffer, const jsmntok_t *params);
-struct command_result *json_bwatch_del_txid(struct command *cmd, const char *buffer, const jsmntok_t *params);
 struct command_result *json_bwatch_del_scid(struct command *cmd, const char *buffer, const jsmntok_t *params);
 struct command_result *json_bwatch_del_blockdepth(struct command *cmd, const char *buffer, const jsmntok_t *params);
 
