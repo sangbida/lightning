@@ -4588,6 +4588,38 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 	wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
 }
 
+void wallet_utxo_spent_watch_revert(struct lightningd *ld,
+				    const char *suffix,
+				    u32 blockheight UNUSED)
+{
+	struct bitcoin_outpoint outpoint;
+	struct db_stmt *stmt;
+	jsmntok_t tok;
+
+	tok.start = 0;
+	tok.end = strlen(suffix);
+	if (!json_to_outpoint(suffix, &tok, &outpoint)) {
+		log_broken(ld->log, "wallet/utxo watch_revert: invalid suffix %s",
+			   suffix);
+		return;
+	}
+
+	/* The spending block was reorged away: clear spendheight so the UTXO
+	 * is treated as unspent again.  The coin movement record stays; if the
+	 * spending tx re-confirms the deduplication in wallet_save_chain_mvt
+	 * suppresses the duplicate.  If the tx is dropped entirely the stale
+	 * record is a known limitation — a reversal coin movement should be
+	 * emitted here in a future cleanup. */
+	stmt = db_prepare_v2(ld->wallet->db,
+		SQL("UPDATE our_outputs SET spendheight = NULL "
+		    "WHERE txid = ? AND outnum = ?;"));
+	db_bind_txid(stmt, &outpoint.txid);
+	db_bind_int(stmt, outpoint.n);
+	db_exec_prepared_v2(take(stmt));
+
+	log_debug(ld->log, "wallet/utxo watch_revert: cleared spendheight for %s",
+		  fmt_bitcoin_outpoint(tmpctx, &outpoint));
+}
 
 static void wallet_annotation_add(struct wallet *w, const struct bitcoin_txid *txid, int num,
 				  enum wallet_tx_annotation_type annotation_type, enum wallet_tx_type type, u64 channel)

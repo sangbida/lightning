@@ -1944,6 +1944,18 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 				   u32 txindex UNUSED);
 
 /**
+ * wallet_utxo_spent_watch_revert - Handler for wallet UTXO spend watch_revert notifications
+ * Owner prefix: "wallet/utxo/<txid>:<outnum>"
+ * Called when the block containing the spend is reorged away; clears
+ * spendheight so the UTXO is treated as unspent again.
+ *
+ * The coin movement record is left in place.  
+ */
+void wallet_utxo_spent_watch_revert(struct lightningd *ld,
+				    const char *suffix,
+				    u32 blockheight);
+
+/**
  * wallet_record_spend - Record chain movement for a wallet UTXO spend
  * Called when a wallet-owned output is spent (from bwatch or topo).
  */

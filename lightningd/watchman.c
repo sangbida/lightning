@@ -455,9 +455,6 @@ void watchman_unwatch_blockdepth(struct lightningd *ld,
 }
 
 /* Dispatch table - add new watch types here */
-static void wallet_utxo_spent_watch_revert(struct lightningd *ld UNUSED,
-					   const char *suffix UNUSED,
-					   u32 blockheight UNUSED) {}
 static void wallet_watch_p2wpkh_revert(struct lightningd *ld UNUSED,
 				       const char *suffix UNUSED,
 				       u32 blockheight UNUSED) {}
