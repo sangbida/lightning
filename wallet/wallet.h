@@ -1127,9 +1127,17 @@ bool wallet_sanity_check(struct wallet *w);
 void wallet_transaction_add(struct wallet *w, const struct wally_tx *tx,
 			    u32 blockheight, u32 txindex);
 
+/* Undo wallet_transaction_add: removes from our_txs only if no our_outputs row still references it. */
+void wallet_del_tx_if_unreferenced(struct wallet *w,
+				   const struct bitcoin_txid *txid);
+
 void wallet_annotate_txout(struct wallet *w,
 			   const struct bitcoin_outpoint *outpoint,
 			   enum wallet_tx_type type, u64 channel);
+
+/* Undo wallet_annotate_txout: removes the OUTPUT_ANNOTATION row for this outpoint. */
+void wallet_del_txout_annotation(struct wallet *w,
+				 const struct bitcoin_outpoint *outpoint);
 
 void wallet_annotate_txin(struct wallet *w, const struct bitcoin_txid *txid,
 			  int innum, enum wallet_tx_type type, u64 channel);
@@ -1930,6 +1938,14 @@ void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
 			      size_t outnum,
 			      u32 blockheight,
 			      u32 txindex);
+
+/**
+ * wallet_scriptpubkey_watch_revert - revert handler for wallet/p2wpkh, p2tr, p2sh_p2wpkh watches.
+ * Undoes got_utxo; deposit coin movement and invoice payment state are not reverted.
+ */
+void wallet_scriptpubkey_watch_revert(struct lightningd *ld,
+				      const char *suffix,
+				      u32 blockheight);
 
 /**
  * wallet_utxo_spent_watch_found - Handler for wallet UTXO spend watch_found notifications

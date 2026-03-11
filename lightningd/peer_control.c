@@ -2671,6 +2671,74 @@ void channel_funding_watch_found(struct lightningd *ld,
 				  blockheight);
 }
 
+/* Revert handler for "channel/funding/<dbid>": the confirming block was reorged away.
+ * Undoes everything channel_funding_watch_found set up, then handles the
+ * reorg according to channel state (mirrors Rusty's funding_reorged_cb). */
+void channel_funding_watch_revert(struct lightningd *ld,
+				  const char *suffix,
+				  u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+
+	if (!channel) {
+		log_debug(ld->log,
+			  "channel/funding revert: unknown dbid %"PRIu64", ignoring",
+			  dbid);
+		return;
+	}
+
+	if (!channel->scid) {
+		/* Already unconfirmed — nothing to do. */
+		return;
+	}
+
+	log_unusual(channel->log,
+		    "Funding tx REORG from depth %u (state %s)",
+		    channel->depth, channel_state_name(channel));
+
+	channel->depth = 0;
+
+	/* Remove the watches installed by channel_funding_watch_found. */
+	watchman_unwatch_blockdepth(ld,
+				    owner_channel_funding_depth(tmpctx, dbid),
+				    blockheight);
+	watchman_unwatch_outpoint(ld,
+				  owner_channel_funding_spent(tmpctx, dbid),
+				  &channel->funding);
+
+	/* Undo wallet_annotate_txout and wallet_transaction_add. */
+	wallet_del_txout_annotation(ld->wallet, &channel->funding);
+	wallet_del_tx_if_unreferenced(ld->wallet, &channel->funding.txid);
+
+	/* Clear the scid. */
+	channel_set_scid(channel, NULL);
+	wallet_channel_save(ld->wallet, channel);
+
+	/* A reorg during AWAITING_LOCKIN is unusual but recoverable; the
+	 * scriptpubkey watch will re-fire if the tx is re-mined.
+	 * For states beyond lock-in, this is more serious. */
+	switch (channel->state) {
+	case CHANNELD_AWAITING_LOCKIN:
+		return;
+	case CHANNELD_NORMAL:
+	case CHANNELD_AWAITING_SPLICE:
+		/* If we opened it or it's zero-conf, fail transiently and
+		 * let the user reconnect once the funding confirms again. */
+		if (channel->opener == LOCAL || channel->minimum_depth == 0) {
+			channel_fail_transient(channel, true,
+					       "Funding tx reorganized out at block %u",
+					       blockheight);
+			return;
+		}
+		/* fall through */
+	default:
+		channel_internal_error(channel,
+				       "Funding tx reorged out in unexpected state %s",
+				       channel_state_name(channel));
+	}
+}
+
 void channel_funding_spent_watch_found(struct lightningd *ld,
 				       const char *suffix,
 				       const struct bitcoin_tx *tx,

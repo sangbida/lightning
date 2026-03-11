@@ -455,18 +455,6 @@ void watchman_unwatch_blockdepth(struct lightningd *ld,
 }
 
 /* Dispatch table - add new watch types here */
-static void wallet_watch_p2wpkh_revert(struct lightningd *ld UNUSED,
-				       const char *suffix UNUSED,
-				       u32 blockheight UNUSED) {}
-static void wallet_watch_p2tr_revert(struct lightningd *ld UNUSED,
-				     const char *suffix UNUSED,
-				     u32 blockheight UNUSED) {}
-static void wallet_watch_p2sh_p2wpkh_revert(struct lightningd *ld UNUSED,
-					    const char *suffix UNUSED,
-					    u32 blockheight UNUSED) {}
-static void channel_funding_watch_revert(struct lightningd *ld UNUSED,
-					 const char *suffix UNUSED,
-					 u32 blockheight UNUSED) {}
 static void channel_funding_spent_watch_revert(struct lightningd *ld UNUSED,
 					       const char *suffix UNUSED,
 					       u32 blockheight UNUSED) {}
@@ -504,11 +492,11 @@ static const struct watch_dispatch {
 	/* wallet/utxo/<txid>:<outnum>: WATCH_OUTPOINT, fires when a wallet UTXO is spent */
 	{ "wallet/utxo/",                 wallet_utxo_spent_watch_found,           wallet_utxo_spent_watch_revert           },
 	/* wallet/p2wpkh/<keyidx>: WATCH_SCRIPTPUBKEY, fires when a p2wpkh wallet address receives funds */
-	{ "wallet/p2wpkh/",               wallet_watch_p2wpkh,                     wallet_watch_p2wpkh_revert               },
+	{ "wallet/p2wpkh/",               wallet_watch_p2wpkh,                     wallet_scriptpubkey_watch_revert         },
 	/* wallet/p2tr/<keyidx>: WATCH_SCRIPTPUBKEY, fires when a p2tr wallet address receives funds */
-	{ "wallet/p2tr/",                 wallet_watch_p2tr,                       wallet_watch_p2tr_revert                 },
+	{ "wallet/p2tr/",                 wallet_watch_p2tr,                       wallet_scriptpubkey_watch_revert         },
 	/* wallet/p2sh_p2wpkh/<keyidx>: WATCH_SCRIPTPUBKEY, fires when a p2sh-wrapped p2wpkh address receives funds */
-	{ "wallet/p2sh_p2wpkh/",          wallet_watch_p2sh_p2wpkh,                wallet_watch_p2sh_p2wpkh_revert          },
+	{ "wallet/p2sh_p2wpkh/",          wallet_watch_p2sh_p2wpkh,                wallet_scriptpubkey_watch_revert         },
 	/* channel/funding/<dbid>: WATCH_SCRIPTPUBKEY, fires when funding tx is confirmed */
 	{ "channel/funding/",             channel_funding_watch_found,             channel_funding_watch_revert             },
 	/* channel/funding_spent/<dbid>: WATCH_OUTPOINT, fires when the funding outpoint is spent */

@@ -202,6 +202,11 @@ void channel_funding_depth_found(struct lightningd *ld,
 				 u32 depth,
 				 u32 blockheight);
 
+/** bwatch revert handler: "channel/funding/<dbid>" — funding confirmation reorged away. */
+void channel_funding_watch_revert(struct lightningd *ld,
+				  const char *suffix,
+				  u32 blockheight);
+
 /** bwatch revert handler: "channel/funding_depth/<dbid>" — confirming block reorged away. */
 void channel_funding_depth_revert(struct lightningd *ld,
 				  const char *suffix,

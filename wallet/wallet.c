@@ -3084,6 +3084,85 @@ void wallet_watch_p2sh_p2wpkh(struct lightningd *ld,
 				 tx, outnum, blockheight, txindex);
 }
 
+/* Undo wallet_annotate_txout for an output annotation. */
+void wallet_del_txout_annotation(struct wallet *w,
+				 const struct bitcoin_outpoint *outpoint)
+{
+	struct db_stmt *stmt = db_prepare_v2(w->db,
+		SQL("DELETE FROM transaction_annotations "
+		    "WHERE txid = ? AND idx = ? AND location = ?"));
+	db_bind_txid(stmt, &outpoint->txid);
+	db_bind_int(stmt, outpoint->n);
+	db_bind_int(stmt, OUTPUT_ANNOTATION);
+	db_exec_prepared_v2(take(stmt));
+}
+
+/* Undo wallet_add_our_output for a single outpoint. */
+static void undo_wallet_add_our_output(struct wallet *w,
+				       const struct bitcoin_outpoint *outpoint)
+{
+	struct db_stmt *stmt = db_prepare_v2(w->db,
+		SQL("DELETE FROM our_outputs WHERE txid = ? AND outnum = ?"));
+	db_bind_txid(stmt, &outpoint->txid);
+	db_bind_int(stmt, outpoint->n);
+	db_exec_prepared_v2(take(stmt));
+}
+
+/* Undo wallet_transaction_add: removes from our_txs only if no our_outputs row still references it. */
+void wallet_del_tx_if_unreferenced(struct wallet *w,
+				   const struct bitcoin_txid *txid)
+{
+	struct db_stmt *stmt = db_prepare_v2(w->db,
+		SQL("SELECT 1 FROM our_outputs WHERE txid = ? LIMIT 1"));
+	db_bind_txid(stmt, txid);
+	db_query_prepared(stmt);
+	if (db_step(stmt)) {
+		tal_free(stmt);
+		return; /* Other outputs still reference this tx — keep it. */
+	}
+	tal_free(stmt);
+
+	stmt = db_prepare_v2(w->db, SQL("DELETE FROM our_txs WHERE txid = ?"));
+	db_bind_txid(stmt, txid);
+	db_exec_prepared_v2(take(stmt));
+}
+
+/*
+ * Undo what wallet_watch_scriptpubkey_common does per output (calling got_utxo
+ * + wallet_transaction_add) for all outputs at keyindex/blockheight.
+ * wallet_save_chain_mvt (deposit coin movement) and invoice_check_onchain_payment
+ * are not reverted — invoice payment state cannot be meaningfully undone.
+ */
+void wallet_scriptpubkey_watch_revert(struct lightningd *ld,
+				      const char *suffix,
+				      u32 blockheight)
+{
+	struct wallet *w = ld->wallet;
+	struct db_stmt *stmt;
+	struct bitcoin_outpoint outpoint;
+	u64 keyindex = strtoull(suffix, NULL, 10);
+
+	stmt = db_prepare_v2(w->db,
+		SQL("SELECT txid, outnum FROM our_outputs "
+		    "WHERE keyindex = ? AND blockheight = ?"));
+	db_bind_u64(stmt, keyindex);
+	db_bind_int(stmt, blockheight);
+	db_query_prepared(stmt);
+
+	while (db_step(stmt)) {
+		db_col_txid(stmt, "txid", &outpoint.txid);
+		outpoint.n = db_col_int(stmt, "outnum");
+
+		watchman_unwatch_outpoint(ld,            
+					  owner_wallet_utxo(tmpctx, &outpoint),
+					  &outpoint);
+		wallet_del_txout_annotation(w, &outpoint); 
+		undo_wallet_add_our_output(w, &outpoint); 
+		wallet_del_tx_if_unreferenced(w, &outpoint.txid); 
+	}
+	tal_free(stmt);
+}
+
 void wallet_htlc_save_in(struct wallet *wallet,
 			 const struct channel *chan, struct htlc_in *in)
 {
