@@ -323,6 +323,15 @@ static struct bitcoin_tx *sign_and_send_last(const tal_t *ctx,
 }
 
 
+/* Compute the P2WSH scriptpubkey for a channel's 2-of-2 funding output. */
+static const u8 *funding_scriptpubkey(const tal_t *ctx,
+				      const struct pubkey *local_key,
+				      const struct pubkey *remote_key)
+{
+	return scriptpubkey_p2wsh(ctx,
+				  bitcoin_redeem_2of2(ctx, local_key, remote_key));
+}
+
 void drop_to_chain(struct lightningd *ld, struct channel *channel,
 		   bool cooperative,
 		   const struct bitcoin_tx *unilateral_tx)
@@ -409,37 +418,39 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 	}
 
 	/* In cooperative mode we closed the right outpoint, but there may be
-	 * other live inflights (dual-fund RBF candidates, splice inflights).
-	 * If any of those confirm unexpectedly the funds are locked in a 2-of-2
-	 * nobody is closing — register a WATCH_SCRIPTPUBKEY for each so bwatch
-	 * tells us if one appears on-chain.  channel_rogue_inflight_watch_found
-	 * then promotes it to the real funding and hands it to onchaind for
-	 * recovery.  All watches share the same owner; the handler disambiguates
-	 * via txid. */
+	 * other live splice inflights that use a different remote funding key
+	 * (and thus a different P2WSH script).  Register a channel/funding
+	 * WATCH_SCRIPTPUBKEY for each distinct script so channel_funding_watch_found
+	 * fires if one confirms unexpectedly (funds locked in a 2-of-2 nobody is
+	 * closing).  Dual-fund RBF inflights share the same keys/script as the
+	 * primary and are already covered. */
 	if (cooperative) {
 		list_for_each(&channel->inflights, inflight, list) {
-			const struct pubkey *remote_key;
-			const u8 *wscript, *scriptpubkey;
+			const u8 *scriptpubkey;
 
 			if (bitcoin_outpoint_eq(&inflight->funding->outpoint,
 						&channel->funding))
 				continue;
 
-			/* Splice inflights use a different remote funding key. */
-			remote_key = inflight->funding->splice_remote_funding
-				? inflight->funding->splice_remote_funding
-				: &channel->channel_info.remote_fundingkey;
-			wscript = bitcoin_redeem_2of2(tmpctx,
-						     &channel->local_funding_pubkey,
-						     remote_key);
-			scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
+			/* Only splice inflights can have a distinct remote key. */
+			if (!inflight->funding->splice_remote_funding)
+				continue;
+			if (pubkey_eq(inflight->funding->splice_remote_funding,
+				      &channel->channel_info.remote_fundingkey))
+				continue;
+
+			scriptpubkey = funding_scriptpubkey(
+				tmpctx,
+				&channel->local_funding_pubkey,
+				inflight->funding->splice_remote_funding);
 			watchman_watch_scriptpubkey(ld,
-				owner_channel_rogue_inflight(tmpctx, channel->dbid),
+				owner_channel_funding(tmpctx, channel->dbid),
 				scriptpubkey, tal_count(scriptpubkey),
 				get_block_height(ld));
 		}
 	}
 }
+
 
 void resend_closing_transactions(struct lightningd *ld)
 {
@@ -2344,7 +2355,45 @@ void channel_block_processed(struct lightningd *ld, u32 blockheight)
 	}
 }
 
-/* bwatch handler: the "wrong" funding outpoint was spent (shutdown_wrong_funding case) */
+/* Revert for "channel/funding_spent/<dbid>": the funding-spend tx was reorged.
+ * Undoes onchaind_funding_spent in reverse order.
+ */
+void channel_funding_spent_watch_revert(struct lightningd *ld,
+					const char *suffix,
+					u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+
+	if (!channel) {
+		log_broken(ld->log,
+			   "channel/funding_spent revert: unknown dbid %"PRIu64", ignoring",
+			   dbid);
+		return;
+	}
+
+	log_unusual(channel->log,
+		    "Funding spend reorged out at block %u (state %s) — rolling back",
+		    blockheight, channel_state_name(channel));
+
+	/* Kill onchaind. */
+	channel_set_owner(channel, NULL);
+
+	/* Clear the recorded close blockheight. */
+	channel->close_blockheight = tal_free(channel->close_blockheight);
+
+	/* Remove all bwatch watches onchaind registered. */
+	onchaind_clear_watches(channel);
+
+	/* Remove the funding spend record so onchaind doesn't replay on restart. */
+	wallet_del_funding_spend(ld->wallet, channel);
+
+	/* Roll state back to CHANNELD_NORMAL.
+	 * channel_set_state calls wallet_channel_save internally. */
+	channel_set_state(channel, channel->state, CHANNELD_NORMAL,
+			  REASON_UNKNOWN, "Funding spend reorged out");
+}
+
 void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
 					     const char *suffix,
 					     const struct bitcoin_tx *tx,
@@ -2371,90 +2420,15 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
 	onchaind_funding_spent(channel, tx, blockheight);
 }
 
-/* Called by watchman when a WATCH_TXID registered for a rogue inflight fires.
- *
- * This happens after a cooperative close when one of the non-closed inflights
- * (dual-fund RBF candidate, or live splice inflight) unexpectedly confirms.
- * Those funds are locked in a 2-of-2 that nobody is actively closing, so we
- * treat the inflight as the real funding and hand it to onchaind for recovery.
- *
- * One-shot: no depth tracking needed.  We unwatch all other inflight txid
- * watches so bwatch doesn't fire for them anymore.
- */
-void channel_rogue_inflight_watch_found(struct lightningd *ld,
-					const char *suffix,
-					const struct bitcoin_tx *tx,
-					size_t outnum UNUSED,
-					u32 blockheight UNUSED,
-					u32 txindex UNUSED)
+/* Both wrong_funding_spent and funding_spent call onchaind_funding_spent,
+ * so their reverts are identical. */
+void channel_wrong_funding_spent_watch_revert(struct lightningd *ld,
+					      const char *suffix,
+					      u32 blockheight)
 {
-	u64 dbid = strtoull(suffix, NULL, 10);
-	struct channel *channel = channel_by_dbid(ld, dbid);
-	struct channel_inflight *inflight, *other;
-	struct bitcoin_txid txid;
-	const char *owner;
-
-	if (!channel) {
-		log_broken(ld->log,
-			   "channel/rogue_inflight watch_found: no channel for dbid %"PRIu64,
-			   dbid);
-		return;
-	}
-
-	bitcoin_txid(tx, &txid);
-
-	/* Find the matching inflight by txid. */
-	inflight = channel_inflight_find(channel, &txid);
-	if (!inflight) {
-		log_unusual(channel->log,
-			    "bwatch: rogue inflight watch fired for unknown txid %s"
-			    " (dbid %"PRIu64") - ignoring",
-			    fmt_bitcoin_txid(tmpctx, &txid), dbid);
-		return;
-	}
-
-	log_unusual(channel->log,
-		    "bwatch: rogue inflight %s confirmed after close"
-		    " — triggering onchaind for fund recovery",
-		    fmt_bitcoin_txid(tmpctx, &txid));
-
-	owner = owner_channel_rogue_inflight(tmpctx, channel->dbid);
-
-	/* Cancel WATCH_SCRIPTPUBKEY for all other inflights — one confirmed,
-	 * the rest are irrelevant.  Derive the scriptpubkey the same way
-	 * drop_to_chain registered it. */
-	list_for_each(&channel->inflights, other, list) {
-		const struct pubkey *remote_key;
-		const u8 *wscript, *scriptpubkey;
-
-		if (other == inflight)
-			continue;
-		if (bitcoin_outpoint_eq(&other->funding->outpoint,
-					&channel->funding))
-			continue;
-
-		remote_key = other->funding->splice_remote_funding
-			? other->funding->splice_remote_funding
-			: &channel->channel_info.remote_fundingkey;
-		wscript = bitcoin_redeem_2of2(tmpctx,
-					      &channel->local_funding_pubkey,
-					      remote_key);
-		scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
-		watchman_unwatch_scriptpubkey(ld, owner,
-					      scriptpubkey,
-					      tal_count(scriptpubkey));
-	}
-
-	/* Promote this inflight to the channel's actual funding so onchaind
-	 * operates on the right outpoint and financial fields. */
-	wallet_annotate_txout(ld->wallet, &inflight->funding->outpoint,
-			      TX_CHANNEL_FUNDING, channel->dbid);
-	update_channel_from_inflight(ld, channel, inflight, false);
-
-	/* Hand to onchaind for fund recovery — one-shot, no depth needed. */
-	channel_fail_saw_onchain(channel, REASON_UNKNOWN, tx,
-				 "Inflight tx confirmed after mutual close");
+	channel_funding_spent_watch_revert(ld, suffix, blockheight);
 }
+
 
 void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
 {
@@ -2472,16 +2446,15 @@ void channel_watch_wrong_funding(struct lightningd *ld, struct channel *channel)
  * watching the old outpoint and we can re-add it for the new one. */
 void channel_unwatch_funding(struct lightningd *ld, struct channel *channel)
 {
-	u8 *wscript, *scriptpubkey;
+	const u8 *scriptpubkey;
 
 	/* Stub channels have no watches. */
 	if (channel->scid && is_stub_scid(*channel->scid))
 		return;
 
-	wscript = bitcoin_redeem_2of2(tmpctx,
-				      &channel->local_funding_pubkey,
-				      &channel->channel_info.remote_fundingkey);
-	scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
+	scriptpubkey = funding_scriptpubkey(tmpctx,
+					    &channel->local_funding_pubkey,
+					    &channel->channel_info.remote_fundingkey);
 
 	if (!channel->scid) {
 		/* Funding not yet on-chain: the scriptpubkey watch is active. */
@@ -2504,11 +2477,10 @@ void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 	if (!channel->scid || is_stub_scid(*channel->scid)) {
 		/* Funding tx not yet on-chain: register a scriptpubkey watch so
 		 * bwatch tells us when it confirms (fires channel_funding_watch_found). */
-		u8 *wscript = bitcoin_redeem_2of2(
+		const u8 *scriptpubkey = funding_scriptpubkey(
 			tmpctx,
 			&channel->local_funding_pubkey,
 			&channel->channel_info.remote_fundingkey);
-		u8 *scriptpubkey = scriptpubkey_p2wsh(tmpctx, wscript);
 
 		log_debug(channel->log,
 			  "bwatch: adding scriptpubkey watch for funding (dbid %"PRIu64")",
@@ -2624,17 +2596,20 @@ void channel_funding_watch_found(struct lightningd *ld,
 	/* Check if this matches the expected funding outpoint. */
 	if (!bitcoin_txid_eq(&txid, &channel->funding.txid)
 	    || outnum != channel->funding.n) {
-		/* Could be the splice tx: same P2WSH, different txid. */
-		/* Store in our_txs so depthcb_update_scid can locate it. */
+		/* Store in our_txs so onchaind can locate it. */
 		wallet_transaction_add(ld->wallet, tx->wtx, blockheight, txindex);
-		if (!channel_splice_watch_found(ld, channel, &txid, outnum,
-						&scid, blockheight))
-			log_unusual(channel->log,
-				    "bwatch: funding watch_found for unexpected"
-				    " outpoint %s:%zu (expected %s:%u), ignoring",
-				    fmt_bitcoin_txid(tmpctx, &txid), outnum,
-				    fmt_bitcoin_txid(tmpctx, &channel->funding.txid),
-				    channel->funding.n);
+
+		/* Could be a splice tx: same P2WSH, different txid. */
+		if (channel_splice_watch_found(ld, channel, &txid, outnum,
+					       &scid, blockheight))
+			return;
+
+		log_unusual(channel->log,
+			    "bwatch: funding watch_found for unexpected"
+			    " outpoint %s:%zu (expected %s:%u), ignoring",
+			    fmt_bitcoin_txid(tmpctx, &txid), outnum,
+			    fmt_bitcoin_txid(tmpctx, &channel->funding.txid),
+			    channel->funding.n);
 		return;
 	}
 
@@ -4149,16 +4124,48 @@ void channel_funding_depth_found(struct lightningd *ld,
 	stop_depth = (channel->minimum_depth > ANNOUNCE_MIN_DEPTH)
 		     ? channel->minimum_depth : ANNOUNCE_MIN_DEPTH;
 	if (depth >= stop_depth) {
+		struct channel_inflight *inflight;
+		const char *owner = owner_channel_funding(tmpctx, dbid);
+
 		confirm_height = blockheight - depth + 1;
 		watchman_unwatch_blockdepth(ld,
 					    owner_channel_funding_depth(tmpctx, dbid),
 					    confirm_height);
+
+		/* Retire all channel/funding scriptpubkey watches now that the
+		 * channel is buried deep enough that a reorg back to depth 0
+		 * is essentially impossible.  All dual-fund RBF candidates share
+		 * the same primary P2WSH; splice inflights with a distinct remote
+		 * key each get their own unwatch. */
+		{
+			const u8 *spk = funding_scriptpubkey(
+				tmpctx,
+				&channel->local_funding_pubkey,
+				&channel->channel_info.remote_fundingkey);
+			watchman_unwatch_scriptpubkey(ld, owner,
+						      spk, tal_count(spk));
+		}
+		list_for_each(&channel->inflights, inflight, list) {
+			const u8 *spk;
+
+			if (!inflight->funding->splice_remote_funding)
+				continue;
+			if (pubkey_eq(inflight->funding->splice_remote_funding,
+				      &channel->channel_info.remote_fundingkey))
+				continue;
+
+			spk = funding_scriptpubkey(
+				tmpctx,
+				&channel->local_funding_pubkey,
+				inflight->funding->splice_remote_funding);
+			watchman_unwatch_scriptpubkey(ld, owner,
+						      spk, tal_count(spk));
+		}
 	}
 }
 
-/* Blockdepth revert handler: the confirming block was reorged away.
- * Remove the watch; the scriptpubkey watch will re-fire if the tx is
- * re-mined, at which point a fresh blockdepth watch is re-registered. */
+/* Reorg: remove the depth watch.  The scriptpubkey watch stays live until
+ * stop_depth, so channel_funding_watch_found re-fires if the tx is re-mined. */
 void channel_funding_depth_revert(struct lightningd *ld,
 				  const char *suffix,
 				  u32 blockheight)

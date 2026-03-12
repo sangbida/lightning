@@ -455,22 +455,6 @@ void watchman_unwatch_blockdepth(struct lightningd *ld,
 }
 
 /* Dispatch table - add new watch types here */
-static void channel_funding_spent_watch_revert(struct lightningd *ld UNUSED,
-					       const char *suffix UNUSED,
-					       u32 blockheight UNUSED) {}
-static void channel_wrong_funding_spent_watch_revert(struct lightningd *ld UNUSED,
-						     const char *suffix UNUSED,
-						     u32 blockheight UNUSED) {}
-static void channel_rogue_inflight_watch_revert(struct lightningd *ld UNUSED,
-						const char *suffix UNUSED,
-						u32 blockheight UNUSED) {}
-static void onchaind_output_watch_revert(struct lightningd *ld UNUSED,
-					 const char *suffix UNUSED,
-					 u32 blockheight UNUSED) {}
-static void gossip_scid_watch_revert(struct lightningd *ld UNUSED,
-				     const char *suffix UNUSED,
-				     u32 blockheight UNUSED) {}
-
 static const struct depth_dispatch {
 	const char *prefix;
 	depth_found_fn handler;
@@ -503,11 +487,12 @@ static const struct watch_dispatch {
 	{ "channel/funding_spent/",       channel_funding_spent_watch_found,       channel_funding_spent_watch_revert       },
 	/* channel/wrong_funding_spent/<dbid>: WATCH_OUTPOINT, fires when shutdown_wrong_funding outpoint is spent */
 	{ "channel/wrong_funding_spent/", channel_wrong_funding_spent_watch_found, channel_wrong_funding_spent_watch_revert },
-	/* channel/rogue_inflight/<dbid>: WATCH_SCRIPTPUBKEY, fires when a non-primary inflight tx confirms */
-	{ "channel/rogue_inflight/",      channel_rogue_inflight_watch_found,      channel_rogue_inflight_watch_revert      },
 	/* onchaind/outpoint/<dbid>: WATCH_OUTPOINT, fires when any onchaind-tracked output is spent */
 	{ "onchaind/outpoint/",           onchaind_output_watch_found,             onchaind_output_watch_revert             },
-	/* gossip/<scid>: WATCH_SCID, fires when a channel announcement UTXO is confirmed */
+	/* gossip/funding_spent/<scid>: WATCH_OUTPOINT, fires when the confirmed funding output is spent */
+	{ "gossip/funding_spent/",        gossip_funding_spent_watch_found,        gossip_funding_spent_watch_revert        },
+	/* gossip/<scid>: WATCH_SCID, fires when the channel announcement UTXO is confirmed.
+	 * tx==NULL signals the SCID's expected position was absent from the block ("not found"). */
 	{ "gossip/",                      gossip_scid_watch_found,                 gossip_scid_watch_revert                 },
 };
 
@@ -590,6 +575,10 @@ static struct command_result *param_bitcoin_blkid_cmd(struct command *cmd,
  *
  * Handles both tx-based watches (scriptpubkey, outpoint, txid, scid) and
  * blockdepth watches.  Dispatches by owner prefix.
+ *
+ * For WATCH_SCID, bwatch may omit "tx" and "txindex" to signal that the
+ * SCID's expected tx/output was absent from the encoded block ("not found").
+ * The handler (gossip_scid_watch_found) detects this via tx==NULL.
  */
 static struct command_result *json_watch_found(struct command *cmd,
 					       const char *buffer,
@@ -611,9 +600,15 @@ static struct command_result *json_watch_found(struct command *cmd,
 		   NULL))
 		return command_param_failed();
 
-	if (!depth && (!tx || !txindex))
+	/* For normal tx-based watches tx+txindex are required.
+	 * Exception: WATCH_SCID owners send watch_found with tx==NULL to
+	 * signal "not found"; their handler checks for this explicitly. */
+	if (!depth && !tx && txindex)
 		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
-				    "tx and txindex required for tx-based watch_found");
+				    "txindex provided without tx in watch_found");
+	if (!depth && tx && !txindex)
+		return command_fail(cmd, JSONRPC2_INVALID_PARAMS,
+				    "tx provided without txindex in watch_found");
 
 	assert(wm);
 	if (command_check_only(cmd))

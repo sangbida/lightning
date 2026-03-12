@@ -30,9 +30,12 @@ static struct command_result *watch_found_done(struct command *cmd,
 }
 
 /* Send watch_found notification to lightningd
- * @txindex: position of tx in the block (0 = coinbase)
- * @outnum: for scriptpubkey watches, which output matched
- * @innum: for outpoint watches, which input matched
+ * @tx: the matching transaction, or NULL for WATCH_SCID "not found" (the
+ *      SCID's expected tx/output was absent from the encoded block position).
+ *      When NULL, tx and txindex are omitted; lightningd detects tx==NULL and
+ *      handles it as the "not found" case in gossip_scid_watch_found.
+ * @txindex: position of tx in the block (0 = coinbase); ignored when tx==NULL
+ * @index: for scriptpubkey watches, which output matched; ignored when tx==NULL
  */
 void bwatch_send_watch_found(struct command *cmd,
 			     const struct bitcoin_tx *tx,
@@ -46,11 +49,15 @@ void bwatch_send_watch_found(struct command *cmd,
 
 	req = jsonrpc_request_start(aux, "watch_found",
 				    watch_found_done, watch_found_done, NULL);
-	json_add_tx(req->js, "tx", tx);
+	/* tx==NULL signals "not found" for WATCH_SCID; omit tx+txindex so
+	 * json_watch_found passes tx=NULL down to the handler. */
+	if (tx) {
+		json_add_tx(req->js, "tx", tx);
+		json_add_u32(req->js, "txindex", txindex);
+		if (index != UINT32_MAX)
+			json_add_u32(req->js, "index", index);
+	}
 	json_add_u32(req->js, "blockheight", blockheight);
-	json_add_u32(req->js, "txindex", txindex);
-	if (index != UINT32_MAX)
-		json_add_u32(req->js, "index", index);
 
 	/* Add owners array */
 	json_array_start(req->js, "owners");

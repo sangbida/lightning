@@ -71,13 +71,6 @@ void channel_fail_permanent(struct channel *channel UNNEEDED,
 			    const char *fmt UNNEEDED,
 			    ...)
 { fprintf(stderr, "channel_fail_permanent called!\n"); abort(); }
-/* Generated stub for channel_fail_saw_onchain */
-void channel_fail_saw_onchain(struct channel *channel UNNEEDED,
-			      enum state_change reason UNNEEDED,
-			      const struct bitcoin_tx *tx UNNEEDED,
-			      const char *fmt UNNEEDED,
-			      ...)
-{ fprintf(stderr, "channel_fail_saw_onchain called!\n"); abort(); }
 /* Generated stub for channel_fail_transient */
 void channel_fail_transient(struct channel *channel UNNEEDED,
 			    bool disconnect UNNEEDED,
@@ -104,10 +97,9 @@ struct htlc_out *channel_has_htlc_out(struct channel *channel UNNEEDED)
 /* Generated stub for channel_important_filter */
 bool channel_important_filter(const struct channel *channel UNNEEDED, void *unused UNNEEDED)
 { fprintf(stderr, "channel_important_filter called!\n"); abort(); }
-/* Generated stub for channel_inflight_find */
-struct channel_inflight *channel_inflight_find(struct channel *channel UNNEEDED,
-					       const struct bitcoin_txid *txid UNNEEDED)
-{ fprintf(stderr, "channel_inflight_find called!\n"); abort(); }
+/* Generated stub for channel_internal_error */
+void channel_internal_error(struct channel *channel UNNEEDED, const char *fmt UNNEEDED, ...)
+{ fprintf(stderr, "channel_internal_error called!\n"); abort(); }
 /* Generated stub for channel_last_funding_feerate */
 u32 channel_last_funding_feerate(const struct channel *channel UNNEEDED)
 { fprintf(stderr, "channel_last_funding_feerate called!\n"); abort(); }
@@ -116,9 +108,19 @@ void channel_set_last_tx(struct channel *channel UNNEEDED,
 			 struct bitcoin_tx *tx UNNEEDED,
 			 const struct bitcoin_signature *sig UNNEEDED)
 { fprintf(stderr, "channel_set_last_tx called!\n"); abort(); }
+/* Generated stub for channel_set_owner */
+void channel_set_owner(struct channel *channel UNNEEDED, struct subd *owner UNNEEDED)
+{ fprintf(stderr, "channel_set_owner called!\n"); abort(); }
 /* Generated stub for channel_set_scid */
 void channel_set_scid(struct channel *channel UNNEEDED, const struct short_channel_id *new_scid UNNEEDED)
 { fprintf(stderr, "channel_set_scid called!\n"); abort(); }
+/* Generated stub for channel_set_state */
+void channel_set_state(struct channel *channel UNNEEDED,
+		       enum channel_state old_state UNNEEDED,
+		       enum channel_state state UNNEEDED,
+		       enum state_change reason UNNEEDED,
+		       const char *why UNNEEDED)
+{ fprintf(stderr, "channel_set_state called!\n"); abort(); }
 /* Generated stub for channel_state_name */
 const char *channel_state_name(const struct channel *channel UNNEEDED)
 { fprintf(stderr, "channel_state_name called!\n"); abort(); }
@@ -542,6 +544,9 @@ void notify_invoice_payment(struct lightningd *ld UNNEEDED,
 			    const struct json_escape *label UNNEEDED,
 			    const struct bitcoin_outpoint *outpoint UNNEEDED)
 { fprintf(stderr, "notify_invoice_payment called!\n"); abort(); }
+/* Generated stub for onchaind_clear_watches */
+void onchaind_clear_watches(struct channel *channel UNNEEDED)
+{ fprintf(stderr, "onchaind_clear_watches called!\n"); abort(); }
 /* Generated stub for onchaind_funding_spent */
 void onchaind_funding_spent(struct channel *channel UNNEEDED,
 			    const struct bitcoin_tx *tx UNNEEDED,
@@ -683,6 +688,17 @@ void wallet_annotate_txout(struct wallet *w UNNEEDED,
 /* Generated stub for wallet_channel_save */
 void wallet_channel_save(struct wallet *w UNNEEDED, struct channel *chan UNNEEDED)
 { fprintf(stderr, "wallet_channel_save called!\n"); abort(); }
+/* Generated stub for wallet_del_funding_spend */
+void wallet_del_funding_spend(struct wallet *w UNNEEDED, const struct channel *chan UNNEEDED)
+{ fprintf(stderr, "wallet_del_funding_spend called!\n"); abort(); }
+/* Generated stub for wallet_del_tx_if_unreferenced */
+void wallet_del_tx_if_unreferenced(struct wallet *w UNNEEDED,
+				   const struct bitcoin_txid *txid UNNEEDED)
+{ fprintf(stderr, "wallet_del_tx_if_unreferenced called!\n"); abort(); }
+/* Generated stub for wallet_del_txout_annotation */
+void wallet_del_txout_annotation(struct wallet *w UNNEEDED,
+				 const struct bitcoin_outpoint *outpoint UNNEEDED)
+{ fprintf(stderr, "wallet_del_txout_annotation called!\n"); abort(); }
 /* Generated stub for wallet_delete_peer_if_unused */
 void wallet_delete_peer_if_unused(struct wallet *w UNNEEDED, u64 peer_dbid UNNEEDED)
 { fprintf(stderr, "wallet_delete_peer_if_unused called!\n"); abort(); }
@@ -739,6 +755,12 @@ void watchman_unwatch_outpoint(struct lightningd *ld UNNEEDED,
 			       const char *owner UNNEEDED,
 			       const struct bitcoin_outpoint *outpoint UNNEEDED)
 { fprintf(stderr, "watchman_unwatch_outpoint called!\n"); abort(); }
+/* Generated stub for watchman_unwatch_scriptpubkey */
+void watchman_unwatch_scriptpubkey(struct lightningd *ld UNNEEDED,
+				   const char *owner UNNEEDED,
+				   const u8 *scriptpubkey UNNEEDED,
+				   size_t script_len UNNEEDED)
+{ fprintf(stderr, "watchman_unwatch_scriptpubkey called!\n"); abort(); }
 /* Generated stub for watchman_watch_blockdepth */
 void watchman_watch_blockdepth(struct lightningd *ld UNNEEDED,
 			       const char *owner UNNEEDED,
@@ -757,12 +779,6 @@ void watchman_watch_scriptpubkey(struct lightningd *ld UNNEEDED,
 				 size_t script_len UNNEEDED,
 				 u32 start_block UNNEEDED)
 { fprintf(stderr, "watchman_watch_scriptpubkey called!\n"); abort(); }
-/* Generated stub for watchman_unwatch_scriptpubkey */
-void watchman_unwatch_scriptpubkey(struct lightningd *ld UNNEEDED,
-				   const char *owner UNNEEDED,
-				   const u8 *scriptpubkey UNNEEDED,
-				   size_t script_len UNNEEDED)
-{ fprintf(stderr, "watchman_unwatch_scriptpubkey called!\n"); abort(); }
 /* AUTOGENERATED MOCKS END */
 
 static void add_candidate(struct routehint_candidate **candidates, int n,

@@ -1941,7 +1941,7 @@ static void handle_channel_locked(struct subd *dualopend,
 	/* Empty out the inflights */
 	wallet_channel_clear_inflights(dualopend->ld->wallet, channel);
 
-	/* That freed watchers in inflights: now watch funding tx */
+	/* Register the outpoint spend watch for the confirmed funding tx. */
 	channel_watch_funding(dualopend->ld, channel);
 
 	/* FIXME: LND sigs/update_fee msgs? */

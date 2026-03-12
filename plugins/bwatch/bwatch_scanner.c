@@ -130,13 +130,11 @@ static void check_tx_outpoint(struct command *cmd,
 }
 
 static void maybe_fire_scid_watch(struct command *cmd,
-				  struct bwatch *bwatch,
 				  const struct bitcoin_block *block,
 				  u32 blockheight,
 				  const struct watch *w)
 {
 	struct bitcoin_tx *tx;
-	struct bitcoin_outpoint outpoint;
 	u32 scid_blockheight, txindex, outnum;
 
 	if (w->type != WATCH_SCID)
@@ -153,6 +151,9 @@ static void maybe_fire_scid_watch(struct command *cmd,
 		plugin_log(cmd->plugin, LOG_BROKEN,
 			   "scid watch blockheight=%u txindex=%u outnum=%u: txindex out of range (block has %zu txs)",
 			   blockheight, txindex, outnum, tal_count(block->tx));
+		/* tx==NULL in watch_found signals "not found" to lightningd,
+		 * which replies to gossipd and cleans up the watch. */
+		bwatch_send_watch_found(cmd, NULL, blockheight, w, txindex, outnum);
 		return;
 	}
 	tx = block->tx[txindex];
@@ -160,20 +161,12 @@ static void maybe_fire_scid_watch(struct command *cmd,
 		plugin_log(cmd->plugin, LOG_BROKEN,
 			   "scid watch blockheight=%u txindex=%u outnum=%u: outnum out of range (tx has %zu outputs)",
 			   blockheight, txindex, outnum, tx->wtx->num_outputs);
+		bwatch_send_watch_found(cmd, NULL, blockheight, w, txindex, outnum);
 		return;
 	}
 
 	/* Notify lightningd that the scid output was confirmed. */
 	bwatch_send_watch_found(cmd, tx, blockheight, w, txindex, outnum);
-
-	/* Register a spend watch so we're notified if the output is later spent. */
-	bitcoin_txid(tx, &outpoint.txid);
-	outpoint.n = outnum;
-	for (size_t i = 0; i < tal_count(w->owners); i++)
-		bwatch_add_watch(cmd, bwatch,
-				 WATCH_OUTPOINT, &outpoint, NULL, NULL,
-				 NULL,
-				 blockheight, w->owners[i]);
 }
 
 /* Check scid watches for a block.
@@ -186,7 +179,7 @@ void bwatch_check_scid_watches(struct command *cmd,
 			       const struct watch *w)
 {
 	if (w) {
-		maybe_fire_scid_watch(cmd, bwatch, block, blockheight, w);
+		maybe_fire_scid_watch(cmd, block, blockheight, w);
 		return;
 	}
 
@@ -198,7 +191,7 @@ void bwatch_check_scid_watches(struct command *cmd,
 	for (scid_w = scid_watches_first(bwatch->scid_watches, &it);
 	     scid_w;
 	     scid_w = scid_watches_next(bwatch->scid_watches, &it)) {
-		maybe_fire_scid_watch(cmd, bwatch, block, blockheight, scid_w);
+		maybe_fire_scid_watch(cmd, block, blockheight, scid_w);
 	}
 }
 

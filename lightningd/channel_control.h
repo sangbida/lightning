@@ -58,8 +58,8 @@ void lockin_complete(struct channel *channel,
 void lockin_has_completed(struct channel *channel, bool record_push);
 
 
-/* Update/set scid now this txid is mined. */
+/* Update/set scid; scid is pre-computed by the caller from block data. */
 bool depthcb_update_scid(struct channel *channel,
-			 const struct bitcoin_txid *txid,
-			 const struct bitcoin_outpoint *outpoint);
+			 const struct bitcoin_outpoint *outpoint,
+			 const struct short_channel_id *scid);
 #endif /* LIGHTNING_LIGHTNINGD_CHANNEL_CONTROL_H */

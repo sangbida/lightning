@@ -24,16 +24,31 @@ void gossip_notify_new_block(struct lightningd *ld);
  */
 void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight);
 
-/**
- * gossip_scid_watch_found - bwatch handler for gossip/ owner prefix.
- * Handles both SCID confirmation (get_txout_reply) and funding spend
- * (gossipd_notify_spends) based on whether blockheight matches the SCID.
- */
+/** bwatch found handler: "gossip/<scid>" — SCID confirmed or not found. */
 void gossip_scid_watch_found(struct lightningd *ld,
 			     const char *suffix,
 			     const struct bitcoin_tx *tx,
 			     size_t outnum,
 			     u32 blockheight,
 			     u32 txindex);
+
+/** bwatch revert handler: "gossip/<scid>" — block reorged before SCID confirmed. */
+void gossip_scid_watch_revert(struct lightningd *ld,
+			      const char *suffix,
+			      u32 blockheight);
+
+/** bwatch found handler: "gossip/funding_spent/<scid>" — funding output spent. */
+void gossip_funding_spent_watch_found(struct lightningd *ld,
+				      const char *suffix,
+				      const struct bitcoin_tx *tx,
+				      size_t index,
+				      u32 blockheight,
+				      u32 txindex);
+
+/** bwatch revert handler: "gossip/funding_spent/<scid>" — funding or spend block reorged. */
+void gossip_funding_spent_watch_revert(struct lightningd *ld,
+				       const char *suffix,
+				       u32 blockheight);
+
 
 #endif /* LIGHTNING_LIGHTNINGD_GOSSIP_CONTROL_H */

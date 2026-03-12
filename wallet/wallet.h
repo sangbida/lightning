@@ -1180,6 +1180,9 @@ void wallet_insert_funding_spend(struct wallet *w,
 				 const struct bitcoin_txid *txid,
 				 const u32 input_num, const u32 blockheight);
 
+/* Undo wallet_insert_funding_spend: removes the funding spend record. */
+void wallet_del_funding_spend(struct wallet *w, const struct channel *chan);
+
 /**
  * Get the transaction which spent funding for this channel, if any.
  */

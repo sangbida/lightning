@@ -180,16 +180,8 @@ void gossip_notify_blockheight(struct lightningd *ld, u32 blockheight)
 		 -1, 0, gossipd_new_blockheight_reply, int2ptr(blockheight));
 }
 
-/**
- * gossip_scid_watch_found - bwatch handler for gossip/ owner prefix.
- *
- * Handles two cases with the same owner "gossip/<scid>":
- * 1. SCID confirmed: bwatch fires the WATCH_SCID, blockheight matches the
- *    SCID's encoded block. We send get_txout_reply to gossipd.
- * 2. Funding spent: bwatch auto-created a WATCH_OUTPOINT when the SCID
- *    confirmed (same owner). When spent, blockheight differs from the SCID's
- *    block. We notify gossipd that the channel is closed.
- */
+/* Called when the channel funding tx is confirmed (or found to be missing).
+ * Replies to gossipd's get_txout request and starts watching for the spend. */
 void gossip_scid_watch_found(struct lightningd *ld,
 			     const char *suffix,
 			     const struct bitcoin_tx *tx,
@@ -205,27 +197,155 @@ void gossip_scid_watch_found(struct lightningd *ld,
 		return;
 	}
 
+	if (!tx) {
+		/* Case 0: SCID's expected position absent — tell gossipd it's invalid. */
+		log_unusual(ld->log,
+			    "gossip: SCID %s not found at expected"
+			    " block/txindex/outnum — telling gossipd it's invalid",
+			    fmt_short_channel_id(tmpctx, scid));
+		if (ld->gossip) {
+			const u8 *empty = tal_arr(tmpctx, u8, 0);
+			subd_send_msg(ld->gossip,
+				      take(towire_gossipd_get_txout_reply(
+						NULL, scid, AMOUNT_SAT(0), empty)));
+		}
+		watchman_unwatch_scid(ld, owner_gossip_scid(tmpctx, scid), &scid);
+		return;
+	}
+
 	if (!ld->gossip)
 		return;
 
-	if (blockheight == short_channel_id_blocknum(scid)) {
-		/* Case 1: SCID confirmed — reply with output details */
-		struct amount_sat sat;
-		const u8 *script;
+	/* Case 1: SCID confirmed — reply with output details. */
+	struct amount_sat sat;
+	const u8 *script;
+	struct bitcoin_outpoint outpoint;
 
-		bitcoin_tx_output_get_amount_sat(tx, index, &sat);
-		script = tal_dup_arr(tmpctx, u8,
-				     tx->wtx->outputs[index].script,
-				     tx->wtx->outputs[index].script_len, 0);
+	bitcoin_tx_output_get_amount_sat(tx, index, &sat);
+	script = tal_dup_arr(tmpctx, u8,
+			     tx->wtx->outputs[index].script,
+			     tx->wtx->outputs[index].script_len, 0);
 
-		subd_send_msg(ld->gossip,
-			      take(towire_gossipd_get_txout_reply(NULL, scid, sat, script)));
-	} else {
-		/* Case 2: Funding output spent — channel closed */
-		gossipd_notify_spends(ld, blockheight,
-				      tal_dup(tmpctx, struct short_channel_id, &scid));
-	}
+	subd_send_msg(ld->gossip,
+		      take(towire_gossipd_get_txout_reply(NULL, scid, sat, script)));
+
+	watchman_unwatch_scid(ld, owner_gossip_scid(tmpctx, scid), &scid);
+	bitcoin_txid(tx, &outpoint.txid);
+	outpoint.n = index;
+	watchman_watch_outpoint(ld,
+				owner_gossip_funding_spent(tmpctx, scid),
+				&outpoint, blockheight);
 }
+
+/**
+ * gossip_scid_watch_revert - revert for "gossip/<scid>" (WATCH_SCID).
+ *
+ * The SCID watch is only alive between gossipd's get_txout request and SCID
+ * confirmation.  A revert here means the block we were waiting for was reorged
+ * before the watch fired — nothing was sent to gossipd, so no notification
+ * needed.  Re-register the SCID watch so bwatch rescans when the block returns.
+ */
+void gossip_scid_watch_revert(struct lightningd *ld,
+			      const char *suffix,
+			      u32 blockheight UNUSED)
+{
+	struct short_channel_id scid;
+
+	if (!short_channel_id_from_str(suffix, strlen(suffix), &scid)) {
+		log_broken(ld->log,
+			   "gossip/ revert: invalid scid suffix '%s'", suffix);
+		return;
+	}
+
+	log_unusual(ld->log,
+		    "gossip: SCID %s block reorged before confirmation"
+		    " — re-watching",
+		    fmt_short_channel_id(tmpctx, scid));
+
+	watchman_watch_scid(ld,
+			    owner_gossip_scid(tmpctx, scid),
+			    &scid,
+			    short_channel_id_blocknum(scid));
+}
+
+/**
+ * gossip_funding_spent_watch_found - bwatch handler for "gossip/funding_spent/<scid>".
+ *
+ * The funding output was spent.  Notify gossipd the channel is closed.
+ */
+void gossip_funding_spent_watch_found(struct lightningd *ld,
+				      const char *suffix,
+				      const struct bitcoin_tx *tx UNUSED,
+				      size_t index UNUSED,
+				      u32 blockheight,
+				      u32 txindex UNUSED)
+{
+	struct short_channel_id scid;
+
+	if (!short_channel_id_from_str(suffix, strlen(suffix), &scid)) {
+		log_broken(ld->log,
+			   "gossip/funding_spent/: invalid scid suffix '%s'",
+			   suffix);
+		return;
+	}
+
+	if (!ld->gossip)
+		return;
+
+	gossipd_notify_spends(ld, blockheight,
+			      tal_dup(tmpctx, struct short_channel_id, &scid));
+}
+
+/**
+ * gossip_funding_spent_watch_revert - revert for "gossip/funding_spent/<scid>".
+ *
+ * bwatch reverts this watch in two distinct situations (distinguished by blockheight):
+ *
+ * Funding-block revert (blockheight == scid's block): the SCID's confirming
+ *   block was reorged away, taking the funding output with it.  We previously
+ *   sent get_txout_reply so gossipd believes the channel exists — undo that.
+ *   Re-register the SCID watch so gossipd re-learns when the block returns.
+ *
+ * Spend-block revert (blockheight != scid's block): the spending tx was
+ *   reorged; the funding output is unspent again.  We previously told gossipd
+ *   the channel was closed — re-register the SCID watch so gossipd re-learns
+ *   the channel is still open once the funding output re-confirms.
+ */
+void gossip_funding_spent_watch_revert(struct lightningd *ld,
+				       const char *suffix,
+				       u32 blockheight)
+{
+	struct short_channel_id scid;
+
+	if (!short_channel_id_from_str(suffix, strlen(suffix), &scid)) {
+		log_broken(ld->log,
+			   "gossip/funding_spent/ revert: invalid scid suffix '%s'",
+			   suffix);
+		return;
+	}
+
+	if (blockheight == short_channel_id_blocknum(scid)) {
+		log_unusual(ld->log,
+			    "gossip: SCID %s funding block reorged out"
+			    " — notifying gossipd and re-watching",
+			    fmt_short_channel_id(tmpctx, scid));
+		if (ld->gossip)
+			gossipd_notify_spends(ld, blockheight,
+					      tal_dup(tmpctx, struct short_channel_id,
+						      &scid));
+	} else {
+		log_unusual(ld->log,
+			    "gossip: SCID %s spend reorged out"
+			    " — re-watching for re-confirmation to gossipd",
+			    fmt_short_channel_id(tmpctx, scid));
+	}
+
+	watchman_watch_scid(ld,
+			    owner_gossip_scid(tmpctx, scid),
+			    &scid,
+			    short_channel_id_blocknum(scid));
+}
+
 
 void gossip_notify_new_block(struct lightningd *ld)
 {

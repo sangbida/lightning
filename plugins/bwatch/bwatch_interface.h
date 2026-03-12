@@ -22,6 +22,7 @@ void bwatch_send_watch_revert(struct command *cmd,
 			      const char *owner,
 			      u32 blockheight);
 
+
 /* Send block_processed notification to watchman (fetches feerates first) */
 
 /* Send chaininfo (chain name, IBD status, sync) to watchman; timer callback */

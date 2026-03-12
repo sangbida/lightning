@@ -151,22 +151,10 @@ void channel_wrong_funding_spent_watch_found(struct lightningd *ld,
 					     u32 blockheight,
 					     u32 txindex);
 
-/**
- * channel_rogue_inflight_watch_found - bwatch handler: a non-primary inflight tx confirmed.
- * Owner prefix: "channel/rogue_inflight/<dbid>"
- * Watch type:   WATCH_TXID (fires when the inflight tx itself confirms)
- *
- * Registered for each inflight whose outpoint differs from channel->funding
- * during drop_to_chain (cooperative).  If one fires, we promote that inflight
- * to the channel's actual funding and hand it to onchaind for recovery.
- * All other rogue-inflight txid watches are cancelled immediately (one-shot).
- */
-void channel_rogue_inflight_watch_found(struct lightningd *ld,
-					const char *suffix,
-					const struct bitcoin_tx *tx,
-					size_t outnum,
-					u32 blockheight,
-					u32 txindex);
+/** bwatch revert handler: "channel/wrong_funding_spent/<dbid>" — spending tx reorged away. */
+void channel_wrong_funding_spent_watch_revert(struct lightningd *ld,
+					      const char *suffix,
+					      u32 blockheight);
 
 /**
  * channel_funding_watch_found - bwatch handler: funding scriptpubkey appeared on-chain.
@@ -195,6 +183,11 @@ void channel_funding_spent_watch_found(struct lightningd *ld,
 				       size_t innum,
 				       u32 blockheight,
 				       u32 txindex);
+
+/** bwatch revert handler: "channel/funding_spent/<dbid>" — spending tx reorged away. */
+void channel_funding_spent_watch_revert(struct lightningd *ld,
+					const char *suffix,
+					u32 blockheight);
 
 /** bwatch depth handler: "channel/funding_depth/<dbid>" — fires each block with confirmation depth. */
 void channel_funding_depth_found(struct lightningd *ld,

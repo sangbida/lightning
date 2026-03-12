@@ -699,34 +699,19 @@ static void handle_splice_sending_sigs(struct lightningd *ld,
 }
 
 bool depthcb_update_scid(struct channel *channel,
-			 const struct bitcoin_txid *txid,
-			 const struct bitcoin_outpoint *outpoint)
+			 const struct bitcoin_outpoint *outpoint,
+			 const struct short_channel_id *scid)
 {
-	struct txlocator *loc;
 	struct lightningd *ld = channel->peer->ld;
-	struct short_channel_id scid;
-
-	/* What scid is this giving us? */
-	loc = wallet_transaction_locate(tmpctx, ld->wallet, txid);
-	if (!mk_short_channel_id(&scid,
-				 loc->blkheight, loc->index,
-				 outpoint->n)) {
-		channel_fail_permanent(channel,
-				       REASON_LOCAL,
-				       "Invalid funding scid %u:%u:%u",
-				       loc->blkheight, loc->index,
-				       outpoint->n);
-		return false;
-	}
 
 	/* No change?  Great. */
-	if (channel->scid && short_channel_id_eq(*channel->scid, scid))
+	if (channel->scid && short_channel_id_eq(*channel->scid, *scid))
 		return true;
 
 	if (!channel->scid) {
 		wallet_annotate_txout(ld->wallet, outpoint,
 				      TX_CHANNEL_FUNDING, channel->dbid);
-		channel_set_scid(channel, &scid);
+		channel_set_scid(channel, scid);
 
 		/* If we have a zeroconf channel, i.e., no scid yet
 		 * but have exchange `channel_ready` messages, then we
@@ -744,8 +729,8 @@ bool depthcb_update_scid(struct channel *channel,
 		 * removed, so just update now */
 		log_info(channel->log, "Short channel id changed from %s->%s",
 			 fmt_short_channel_id(tmpctx, *channel->scid),
-			 fmt_short_channel_id(tmpctx, scid));
-		channel_set_scid(channel, &scid);
+			 fmt_short_channel_id(tmpctx, *scid));
+		channel_set_scid(channel, scid);
 		/* In case we broadcast it before (e.g. splice!) */
 		channel_add_old_scid(channel, old_scid);
 		channel_gossip_scid_changed(channel);
@@ -1088,8 +1073,9 @@ static void handle_peer_splice_locked(struct channel *channel, const u8 *msg)
 
 	wallet_channel_clear_inflights(channel->peer->ld->wallet, channel);
 
-	depthcb_update_scid(channel, &locked_txid,
-			    &inflight->funding->outpoint);
+	depthcb_update_scid(channel,
+			    &inflight->funding->outpoint,
+			    inflight->locked_scid);
 
 	/* That freed watchers in inflights: now watch funding tx */
 	channel_watch_funding(channel->peer->ld, channel);

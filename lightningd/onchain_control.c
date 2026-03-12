@@ -190,7 +190,7 @@ static void onchain_tx_depth(struct channel *channel,
  *
  * Idempotent: skips if already tracked.  Adds the tx to the per-channel
  * hash table (confirm height for depth math; full tx for output enumeration
- * on unwatch), then registers a WATCH_TXID for depth notifications and a
+ * on unwatch), then registers a WATCH_BLOCKDEPTH for depth notifications and a
  * WATCH_OUTPOINT per output so onchaind_output_watch_found fires if/when
  * each output is spent.
  */
@@ -329,11 +329,64 @@ void onchaind_output_watch_found(struct lightningd *ld,
 	onchain_txo_spent(channel, tx, innum, blockheight);
 }
 
+/* Revert for "onchaind/outpoint/<dbid>": an output-spending tx was reorged.
+ *
+ * onchaind_output_watch_found called bwatch_register_tx(channel, spending_tx, blockheight),
+ * which added spending_tx to onchaind_watches and registered WATCH_OUTPOINT for each
+ * of its outputs, plus WATCH_BLOCKDEPTH for csv/htlc_depth.  We undo all of that here.
+ *
+ * Note: the onchaind_spent message already sent to onchaind cannot be recalled.
+ * Onchaind is still running; it will eventually see the re-mined block and
+ * get the correct depth updates again. */
+/* Forward declaration — defined below alongside the other unwatch helpers. */
+static void unwatch_entry(struct channel *channel,
+			  const struct onchaind_watched_tx *entry);
+
+void onchaind_output_watch_revert(struct lightningd *ld,
+				  const char *suffix,
+				  u32 blockheight)
+{
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+	struct onchaind_tx_map_iter it;
+	struct onchaind_watched_tx *entry;
+	struct onchaind_watched_tx **to_remove;
+
+	if (!channel) {
+		log_broken(ld->log,
+			   "onchaind/outpoint revert: unknown dbid %"PRIu64", ignoring",
+			   dbid);
+		return;
+	}
+
+	if (!channel->onchaind_watches)
+		return;
+
+	log_unusual(channel->log,
+		    "onchaind-tracked output spend reorged out at block %u", blockheight);
+
+	to_remove = tal_arr(tmpctx, struct onchaind_watched_tx *, 0);
+
+	/* Collect entries registered at this blockheight (the reorged spending tx). */
+	for (entry = onchaind_tx_map_first(channel->onchaind_watches, &it);
+	     entry;
+	     entry = onchaind_tx_map_next(channel->onchaind_watches, &it)) {
+		if (entry->blockheight != blockheight)
+			continue;
+		unwatch_entry(channel, entry);
+		tal_arr_expand(&to_remove, entry);
+	}
+
+	for (size_t i = 0; i < tal_count(to_remove); i++) {
+		onchaind_tx_map_delkey(channel->onchaind_watches, &to_remove[i]->txid);
+		tal_free(to_remove[i]);
+	}
+}
+
 /**
  * onchaind_send_depth_updates - Send current depth for all tracked txs.
  *
  * Called from channel_block_processed for ONCHAIN/FUNDING_SPEND_SEEN channels.
- * Replaces the old per-tx topology txwatch per-block callbacks.
  */
 void onchaind_send_depth_updates(struct channel *channel, u32 blockheight)
 {
@@ -461,26 +514,65 @@ static void handle_onchain_htlc_timeout(struct channel *channel, const u8 *msg)
 	onchain_failed_our_htlc(channel, &htlc, "timed out", true);
 }
 
+/* Remove all bwatch watches for one entry: outpoints on its outputs and the
+ * csv/htlc_depth blockdepth watch at its confirm height.
+ * Does not remove the entry from the hash table. */
+static void unwatch_entry(struct channel *channel,
+			  const struct onchaind_watched_tx *entry)
+{
+	struct lightningd *ld = channel->peer->ld;
+	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid);
+	struct bitcoin_outpoint outpoint;
+
+	outpoint.txid = entry->txid;
+	for (outpoint.n = 0; outpoint.n < entry->num_outputs; outpoint.n++)
+		watchman_unwatch_outpoint(ld, owner_out, &outpoint);
+
+	watchman_unwatch_blockdepth(ld,
+				    owner_onchaind_csv(tmpctx, channel->dbid),
+				    entry->blockheight);
+	watchman_unwatch_blockdepth(ld,
+				    owner_onchaind_htlc_depth(tmpctx, channel->dbid),
+				    entry->blockheight);
+}
+
+/**
+ * onchaind_clear_watches - Remove all bwatch watches that onchaind registered.
+ *
+ * Called when the funding-spend is reorged and onchaind is killed.  Removes
+ * every outpoint and blockdepth watch for every tracked tx, then frees the
+ * table.  Unlike handle_irrevocably_resolved, nothing was cleaned up
+ * incrementally, so we use unwatch_entry for the full removal.
+ */
+void onchaind_clear_watches(struct channel *channel)
+{
+	struct onchaind_tx_map_iter it;
+	struct onchaind_watched_tx *entry;
+
+	if (!channel->onchaind_watches)
+		return;
+
+	for (entry = onchaind_tx_map_first(channel->onchaind_watches, &it);
+	     entry;
+	     entry = onchaind_tx_map_next(channel->onchaind_watches, &it))
+		unwatch_entry(channel, entry);
+
+	channel->onchaind_watches = tal_free(channel->onchaind_watches);
+}
+
 static void handle_irrevocably_resolved(struct channel *channel, const u8 *msg UNUSED)
 {
 	struct lightningd *ld = channel->peer->ld;
 	struct onchaind_tx_map_iter it;
 	struct onchaind_watched_tx *entry;
 
-	/* Remove the onchaind/csv and onchaind/htlc_depth blockdepth watches.
-	 * We reuse onchaind_watches here only to recover the blockheight each
-	 * watch was registered with — the txid/outpoint watches themselves were
-	 * already removed incrementally by onchaind_spent_reply as each tx was
-	 * resolved. */
-	for (entry = onchaind_tx_map_first(channel->onchaind_watches, &it);
-	     entry;
-	     entry = onchaind_tx_map_next(channel->onchaind_watches, &it)) {
-		watchman_unwatch_blockdepth(ld,
-					    owner_onchaind_csv(tmpctx, channel->dbid),
-					    entry->blockheight);
-		watchman_unwatch_blockdepth(ld,
-					    owner_onchaind_htlc_depth(tmpctx, channel->dbid),
-					    entry->blockheight);
+	/* Any remaining outpoint unwatches are idempotent (bwatch handles
+	 * duplicate deletes gracefully); the blockdepth watches are still live. */
+	if (channel->onchaind_watches) {
+		for (entry = onchaind_tx_map_first(channel->onchaind_watches, &it);
+		     entry;
+		     entry = onchaind_tx_map_next(channel->onchaind_watches, &it))
+			unwatch_entry(channel, entry);
 	}
 
 	/* FIXME: Implement check_htlcs to ensure no dangling hout->in ptrs! */

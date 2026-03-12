@@ -618,6 +618,9 @@ void notify_sendpay_failure(struct lightningd *ld UNNEEDED,
 void notify_sendpay_success(struct lightningd *ld UNNEEDED,
 			    const struct wallet_payment *payment UNNEEDED)
 { fprintf(stderr, "notify_sendpay_success called!\n"); abort(); }
+/* Generated stub for onchaind_clear_watches */
+void onchaind_clear_watches(struct channel *channel UNNEEDED)
+{ fprintf(stderr, "onchaind_clear_watches called!\n"); abort(); }
 /* Generated stub for onchaind_funding_spent */
 void onchaind_funding_spent(struct channel *channel UNNEEDED,
 			    const struct bitcoin_tx *tx UNNEEDED,

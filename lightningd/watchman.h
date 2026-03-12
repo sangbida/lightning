@@ -50,6 +50,7 @@ typedef void (*watch_revert_fn)(struct lightningd *ld,
 				const char *suffix,
 				u32 blockheight);
 
+
 /**
  * depth_found_fn - Handler for blockdepth watch notifications.
  * @depth: new_height - confirm_height + 1 (always >= 1)
@@ -178,9 +179,6 @@ static inline const char *owner_channel_funding_spent(const tal_t *ctx, u64 dbid
 static inline const char *owner_channel_wrong_funding_spent(const tal_t *ctx, u64 dbid)
 { return tal_fmt(ctx, "channel/wrong_funding_spent/%"PRIu64, dbid); }
 
-static inline const char *owner_channel_rogue_inflight(const tal_t *ctx, u64 dbid)
-{ return tal_fmt(ctx, "channel/rogue_inflight/%"PRIu64, dbid); }
-
 /* onchaind/ owners */
 static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid)
 { return tal_fmt(ctx, "onchaind/outpoint/%"PRIu64, dbid); }
@@ -189,6 +187,10 @@ static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid)
 static inline const char *owner_gossip_scid(const tal_t *ctx,
 					     struct short_channel_id scid)
 { return tal_fmt(ctx, "gossip/%s", fmt_short_channel_id(ctx, scid)); }
+
+static inline const char *owner_gossip_funding_spent(const tal_t *ctx,
+						      struct short_channel_id scid)
+{ return tal_fmt(ctx, "gossip/funding_spent/%s", fmt_short_channel_id(ctx, scid)); }
 
 /*
  * blockdepth/ owner string constructors. */

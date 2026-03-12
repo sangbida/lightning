@@ -4878,6 +4878,15 @@ void wallet_insert_funding_spend(struct wallet *w,
 	db_exec_prepared_v2(take(stmt));
 }
 
+void wallet_del_funding_spend(struct wallet *w, const struct channel *chan)
+{
+	struct db_stmt *stmt = db_prepare_v2(w->db,
+		SQL("DELETE FROM our_channel_txs WHERE channel_id = ? AND type = ?"));
+	db_bind_u64(stmt, chan->dbid);
+	db_bind_int(stmt, 5001); /* WIRE_ONCHAIND_INIT — the funding spend type */
+	db_exec_prepared_v2(take(stmt));
+}
+
 struct bitcoin_tx *wallet_get_funding_spend(const tal_t *ctx,
 					    struct wallet *w,
 					    u64 channel_id,
