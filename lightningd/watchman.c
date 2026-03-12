@@ -462,6 +462,10 @@ static const struct depth_dispatch {
 } depth_handlers[] = {
 	/* channel/funding_depth/<dbid>: WATCH_BLOCKDEPTH, fires each block while funding tx accumulates confirmations */
 	{ "channel/funding_depth/", channel_funding_depth_found, channel_funding_depth_revert },
+	/* onchaind/channel_close/<dbid>/<txid>: WATCH_BLOCKDEPTH, fires each block while onchaind
+	 * is active.  Serves as the crash-recovery restart marker: if onchaind is not running when
+	 * this fires, the handler looks up the spending tx and re-launches onchaind. */
+	{ "onchaind/channel_close/", onchaind_channel_close_depth_found, onchaind_channel_close_depth_revert },
 	/* onchaind/csv/<dbid>: WATCH_BLOCKDEPTH, fires each block to drive CSV maturity checks in onchaind */
 	{ "onchaind/csv/",          onchaind_csv_depth_found,    onchaind_csv_depth_revert    },
 	/* onchaind/htlc_depth/<dbid>: WATCH_BLOCKDEPTH, fires each block to drive HTLC maturity checks in onchaind */

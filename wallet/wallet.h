@@ -1172,26 +1172,6 @@ struct bitcoin_txid *wallet_transactions_by_height(const tal_t *ctx,
 						   const u32 blockheight);
 
 /**
- * Store funding txid spend to start replay on restart.
- * Uses our_channel_txs, not the legacy channeltxs table.
- */
-void wallet_insert_funding_spend(struct wallet *w,
-				 const struct channel *chan,
-				 const struct bitcoin_txid *txid,
-				 const u32 input_num, const u32 blockheight);
-
-/* Undo wallet_insert_funding_spend: removes the funding spend record. */
-void wallet_del_funding_spend(struct wallet *w, const struct channel *chan);
-
-/**
- * Get the transaction which spent funding for this channel, if any.
- */
-struct bitcoin_tx *wallet_get_funding_spend(const tal_t *ctx,
-					    struct wallet *w,
-					    u64 channel_id,
-					    u32 *blockheight);
-
-/**
  * Add of update a forwarded_payment
  */
 void wallet_forwarded_payment_add(struct wallet *w, const struct htlc_in *in,

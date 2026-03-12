@@ -5,6 +5,7 @@
 #include <bitcoin/short_channel_id.h>
 #include <bitcoin/tx.h>
 #include <ccan/tal/str/str.h>
+#include <common/utils.h>
 #include <inttypes.h>
 #include <lightningd/feerate.h>
 
@@ -203,5 +204,15 @@ static inline const char *owner_onchaind_csv(const tal_t *ctx, u64 dbid)
 
 static inline const char *owner_onchaind_htlc_depth(const tal_t *ctx, u64 dbid)
 { return tal_fmt(ctx, "onchaind/htlc_depth/%"PRIu64, dbid); }
+
+/* onchaind/channel_close/<dbid>:<txid_hex>: persistent restart marker for
+ * channel closes.  Uses ':' to separate dbid from txid within the suffix,
+ * consistent with wallet/utxo/<txid>:<outnum>.  Txid is in internal byte
+ * order hex. */
+static inline const char *owner_onchaind_channel_close(const tal_t *ctx,
+						       u64 dbid,
+						       const struct bitcoin_txid *txid)
+{ return tal_fmt(ctx, "onchaind/channel_close/%"PRIu64":%s",
+		 dbid, tal_hexstr(ctx, txid, sizeof(*txid))); }
 
 #endif /* LIGHTNING_LIGHTNINGD_WATCHMAN_H */

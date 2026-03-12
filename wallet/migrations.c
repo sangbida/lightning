@@ -1171,16 +1171,6 @@ static const struct db_migration dbmigrations[] = {
 	 "  rawtx BLOB"
 	 ")"), NULL,
      SQL("DROP TABLE our_txs"), NULL},
-    {SQL("CREATE TABLE our_channel_txs ("
-	 "  id BIGSERIAL,"
-	 "  channel_id BIGINT REFERENCES channels(id),"
-	 "  type INTEGER,"
-	 "  transaction_id BLOB REFERENCES our_txs(txid),"
-	 "  input_num INTEGER,"
-	 "  blockheight INTEGER,"
-	 "  PRIMARY KEY (id)"
-	 ")"), NULL,
-     SQL("DROP TABLE our_channel_txs"), NULL},
     /* Backfill old utxoset → our_outputs, old transactions → our_txs.
      * No revert needed: the blocks table is untouched by the new code so
      * the downgraded topology-driven release naturally rescans from its

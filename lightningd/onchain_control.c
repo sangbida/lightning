@@ -2,6 +2,7 @@
 #include <bitcoin/feerate.h>
 #include <bitcoin/script.h>
 #include <ccan/cast/cast.h>
+#include <ccan/str/hex/hex.h>
 #include <ccan/tal/str/str.h>
 #include <common/htlc_tx.h>
 #include <common/memleak.h>
@@ -548,6 +549,17 @@ void onchaind_clear_watches(struct channel *channel)
 {
 	struct onchaind_tx_map_iter it;
 	struct onchaind_watched_tx *entry;
+	struct lightningd *ld = channel->peer->ld;
+
+	/* Remove the channel_close restart-marker watch first. */
+	if (channel->funding_spend_txid) {
+		watchman_unwatch_blockdepth(ld,
+					    owner_onchaind_channel_close(
+						    tmpctx, channel->dbid,
+						    channel->funding_spend_txid),
+					    *channel->close_blockheight);
+		channel->funding_spend_txid = tal_free(channel->funding_spend_txid);
+	}
 
 	if (!channel->onchaind_watches)
 		return;
@@ -565,6 +577,16 @@ static void handle_irrevocably_resolved(struct channel *channel, const u8 *msg U
 	struct lightningd *ld = channel->peer->ld;
 	struct onchaind_tx_map_iter it;
 	struct onchaind_watched_tx *entry;
+
+	/* Remove the channel_close restart-marker watch — onchaind is done,
+	 * so we no longer need to be able to restart it. */
+	if (channel->funding_spend_txid) {
+		watchman_unwatch_blockdepth(ld,
+					    owner_onchaind_channel_close(
+						    tmpctx, channel->dbid,
+						    channel->funding_spend_txid),
+					    *channel->close_blockheight);
+	}
 
 	/* Any remaining outpoint unwatches are idempotent (bwatch handles
 	 * duplicate deletes gracefully); the blockdepth watches are still live. */
@@ -1777,6 +1799,88 @@ static void onchain_error(struct channel *channel,
 	channel_set_billboard(channel, true, desc);
 }
 
+/**
+ * onchaind_channel_close_depth_found - blockdepth handler for channel closes.
+ *
+ * This watch fires every block from the funding-spend block until deleted by
+ * handle_irrevocably_resolved.  Its sole job is crash-recovery: if onchaind
+ * is not running when it fires (node restarted mid-close), it looks up the
+ * spending tx from our_txs and re-launches onchaind.  When onchaind is
+ * already running the handler is a no-op (depth updates go via
+ * onchaind/csv/<dbid> and onchaind/htlc_depth/<dbid>).
+ *
+ * Owner format: "onchaind/channel_close/<dbid>:<txid_hex>"
+ */
+void onchaind_channel_close_depth_found(struct lightningd *ld,
+					const char *suffix,
+					u32 depth UNUSED,
+					u32 blockheight UNUSED)
+{
+	const char *txid_hex;
+	u64 dbid;
+	struct bitcoin_txid txid;
+	struct channel *channel;
+	struct bitcoin_tx *tx;
+
+	/* suffix is "<dbid>:<txid_hex>" */
+	txid_hex = strchr(suffix, ':');
+	if (!txid_hex) {
+		log_broken(ld->log,
+			   "onchaind/channel_close: malformed suffix '%s'",
+			   suffix);
+		return;
+	}
+	txid_hex++; /* skip ':' */
+
+	dbid = strtoull(suffix, NULL, 10);
+	channel = channel_by_dbid(ld, dbid);
+	if (!channel)
+		return;
+
+	/* onchaind already running — normal per-block firing, nothing to do. */
+	if (channel->owner)
+		return;
+
+	/* Restart case: onchaind was killed (crash/restart).
+	 * Recover the spending tx from our_txs and re-launch onchaind. */
+	if (!hex_decode(txid_hex, strlen(txid_hex), &txid, sizeof(txid))
+	    || strlen(txid_hex) != sizeof(txid) * 2) {
+		log_broken(channel->log,
+			   "onchaind/channel_close: bad txid hex in suffix '%s'",
+			   suffix);
+		return;
+	}
+
+	tx = wallet_transaction_get(tmpctx, ld->wallet, &txid);
+	if (!tx) {
+		log_broken(channel->log,
+			   "onchaind/channel_close: spending tx not found in our_txs");
+		return;
+	}
+
+	if (!channel->close_blockheight) {
+		log_broken(channel->log,
+			   "onchaind/channel_close: no close_blockheight on channel");
+		return;
+	}
+
+	log_info(channel->log,
+		 "Restarting onchaind after crash (channel_close watch fired)");
+	onchaind_funding_spent(channel, tx, *channel->close_blockheight);
+}
+
+/* Revert handler: called when the block that confirmed the channel close is
+ * reorged away.  Just unwatch — onchaind_clear_watches handles the rest. */
+void onchaind_channel_close_depth_revert(struct lightningd *ld,
+					 const char *suffix,
+					 u32 blockheight)
+{
+	watchman_unwatch_blockdepth(ld,
+				    tal_fmt(tmpctx, "onchaind/channel_close/%s",
+					    suffix),
+				    blockheight);
+}
+
 /* With a reorg, this can get called multiple times; each time we'll kill
  * onchaind (like any other owner), and restart */
 void onchaind_funding_spent(struct channel *channel,
@@ -1818,8 +1922,20 @@ void onchaind_funding_spent(struct channel *channel,
 			  reason,
 			  tal_fmt(tmpctx, "Onchain funding spend"));
 
-	wallet_insert_funding_spend(ld->wallet, channel, &funding_txid, 0, blockheight);
 	wallet_transaction_add(ld->wallet, tx->wtx, blockheight, 0);
+
+	/* Record the spending txid in-memory so unwatch in handle_irrevocably_resolved
+	 * and onchaind_clear_watches can construct the owner string. */
+	channel->funding_spend_txid = tal_dup(channel, struct bitcoin_txid, &funding_txid);
+
+	/* Persistent restart marker: this blockdepth watch fires every block until
+	 * explicitly deleted in handle_irrevocably_resolved.  On restart the handler
+	 * (onchaind_channel_close_depth_found) sees channel->owner == NULL and
+	 * re-launches onchaind — no separate DB table required. */
+	watchman_watch_blockdepth(ld,
+				  owner_onchaind_channel_close(tmpctx, channel->dbid,
+							       &funding_txid),
+				  blockheight);
 
 	hsmfd = hsm_get_client_fd(ld, &channel->peer->id,
 				  channel->dbid,
@@ -1917,41 +2033,6 @@ void onchaind_funding_spent(struct channel *channel,
 	if (!channel->onchaind_watches)
 		channel->onchaind_watches = new_htable(channel, onchaind_tx_map);
 	bwatch_register_tx(channel, tx, blockheight);
-}
-
-void onchaind_restart_closed_channels(struct lightningd *ld)
-{
-	struct peer *peer;
-	struct peer_node_id_map_iter it;
-
-	/* We don't hold a db tx for all of init */
-	db_begin_transaction(ld->wallet->db);
-
-	for (peer = peer_node_id_map_first(ld->peers, &it);
-	     peer;
-	     peer = peer_node_id_map_next(ld->peers, &it)) {
-		struct channel *channel;
-
-		list_for_each(&peer->channels, channel, list) {
-			struct bitcoin_tx *tx;
-			u32 blockheight;
-
-			if (channel_state_uncommitted(channel->state))
-				continue;
-
-			tx = wallet_get_funding_spend(tmpctx, ld->wallet, channel->dbid,
-						      &blockheight);
-			if (!tx)
-				continue;
-
-			log_info(channel->log,
-				 "Restarting onchaind (%s): closed in block %u",
-				 channel_state_name(channel), blockheight);
-
-			onchaind_funding_spent(channel, tx, blockheight);
-		}
-	}
-	db_commit_transaction(ld->wallet->db);
 }
 
 /*

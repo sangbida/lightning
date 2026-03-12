@@ -2385,9 +2385,6 @@ void channel_funding_spent_watch_revert(struct lightningd *ld,
 	/* Remove all bwatch watches onchaind registered. */
 	onchaind_clear_watches(channel);
 
-	/* Remove the funding spend record so onchaind doesn't replay on restart. */
-	wallet_del_funding_spend(ld->wallet, channel);
-
 	/* Roll state back to CHANNELD_NORMAL.
 	 * channel_set_state calls wallet_channel_save internally. */
 	channel_set_state(channel, channel->state, CHANNELD_NORMAL,

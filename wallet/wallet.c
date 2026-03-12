@@ -29,7 +29,7 @@
 #include <lightningd/peer_htlcs.h>
 #include <lightningd/runes.h>
 #include <lightningd/watchman.h>
-#include <onchaind/onchaind_wiregen.h>
+#include <onchaind/onchaind_wire.h>
 #include <wallet/datastore.h>
 #include <wallet/invoices.h>
 #include <wallet/migrations.h>
@@ -2732,18 +2732,6 @@ void wallet_channel_close(struct wallet *w,
 	db_bind_u64(stmt, chan->dbid);
 	db_exec_prepared_v2(take(stmt));
 
-	/* Delete entries from legacy channeltxs. */
-	stmt = db_prepare_v2(w->db, SQL("DELETE FROM channeltxs "
-					"WHERE channel_id=?"));
-	db_bind_u64(stmt, chan->dbid);
-	db_exec_prepared_v2(take(stmt));
-
-	/* Delete entries from our onchaind restart table. */
-	stmt = db_prepare_v2(w->db, SQL("DELETE FROM our_channel_txs "
-					"WHERE channel_id=?"));
-	db_bind_u64(stmt, chan->dbid);
-	db_exec_prepared_v2(take(stmt));
-
 	/* Delete any entries from 'inflights' */
 	stmt = db_prepare_v2(w->db,
 			     SQL("DELETE FROM channel_funding_inflights "
@@ -4853,68 +4841,6 @@ struct bitcoin_txid *wallet_transactions_by_height(const tal_t *ctx,
 	tal_free(stmt);
 
 	return txids;
-}
-
-void wallet_insert_funding_spend(struct wallet *w,
-				 const struct channel *chan,
-				 const struct bitcoin_txid *txid,
-				 const u32 input_num, const u32 blockheight)
-{
-	struct db_stmt *stmt;
-
-	stmt = db_prepare_v2(w->db, SQL("INSERT INTO our_channel_txs ("
-					"  channel_id"
-					", type"
-					", transaction_id"
-					", input_num"
-					", blockheight"
-					") VALUES (?, ?, ?, ?, ?);"));
-	db_bind_u64(stmt, chan->dbid);
-	/* FIXME: This is WIRE_ONCHAIND_INIT, accidentally leaked into db! */
-	db_bind_int(stmt, 5001);
-	db_bind_txid(stmt, txid);
-	db_bind_int(stmt, input_num);
-	db_bind_int(stmt, blockheight);
-	db_exec_prepared_v2(take(stmt));
-}
-
-void wallet_del_funding_spend(struct wallet *w, const struct channel *chan)
-{
-	struct db_stmt *stmt = db_prepare_v2(w->db,
-		SQL("DELETE FROM our_channel_txs WHERE channel_id = ? AND type = ?"));
-	db_bind_u64(stmt, chan->dbid);
-	db_bind_int(stmt, 5001); /* WIRE_ONCHAIND_INIT — the funding spend type */
-	db_exec_prepared_v2(take(stmt));
-}
-
-struct bitcoin_tx *wallet_get_funding_spend(const tal_t *ctx,
-					    struct wallet *w,
-					    u64 channel_id,
-					    u32 *blockheight)
-{
-	struct db_stmt *stmt;
-	struct bitcoin_tx *tx;
-
-	stmt = db_prepare_v2(w->db,
-			     SQL("SELECT"
-				 " t.blockheight"
-				 ", t.rawtx"
-				 " FROM our_channel_txs c"
-				 " JOIN our_txs t ON t.txid = c.transaction_id"
-				 " WHERE c.channel_id = ? AND c.type = ?"
-				 " ORDER BY c.id ASC;"));
-	db_bind_u64(stmt, channel_id);
-	db_bind_int(stmt, WIRE_ONCHAIND_INIT);
-	db_query_prepared(stmt);
-
-	if (db_step(stmt)) {
-		tx = db_col_tx(ctx, stmt, "t.rawtx");
-		*blockheight = db_col_int(stmt, "t.blockheight");
-	} else
-		tx = NULL;
-	tal_free(stmt);
-
-	return tx;
 }
 
 static bool wallet_forwarded_payment_update(struct wallet *w,

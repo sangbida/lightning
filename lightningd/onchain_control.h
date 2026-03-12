@@ -10,7 +10,23 @@ void onchaind_funding_spent(struct channel *channel,
 			    const struct bitcoin_tx *tx,
 			    u32 blockheight);
 
-void onchaind_restart_closed_channels(struct lightningd *ld);
+/**
+ * bwatch depth handler: "onchaind/channel_close/<dbid>/<txid_hex>"
+ *
+ * Fires every block from the funding-spend block until deleted by
+ * handle_irrevocably_resolved.  When onchaind is not running (crash/restart),
+ * looks up the spending tx from our_txs and re-launches onchaind.
+ * No-op when onchaind is already running.
+ */
+void onchaind_channel_close_depth_found(struct lightningd *ld,
+					const char *suffix,
+					u32 depth,
+					u32 blockheight);
+
+/** bwatch revert handler: "onchaind/channel_close/<dbid>/<txid_hex>" */
+void onchaind_channel_close_depth_revert(struct lightningd *ld,
+					 const char *suffix,
+					 u32 blockheight);
 
 /** bwatch handler: "onchaind/outpoint/<dbid>" — output spent, notify onchaind. */
 void onchaind_output_watch_found(struct lightningd *ld,

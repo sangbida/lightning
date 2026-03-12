@@ -216,6 +216,14 @@ struct channel {
 	/* Number of outstanding onchaind_spent calls */
 	size_t num_onchain_spent_calls;
 
+	/* The txid of the tx that spent our funding output, set by
+	 * onchaind_funding_spent.  Used to build the owner string for the
+	 * onchaind/channel_close blockdepth watch so we can unwatch it in
+	 * handle_irrevocably_resolved and onchaind_clear_watches.
+	 * In-memory only (not persisted); repopulated on restart by the
+	 * onchaind/channel_close depth handler before onchaind is relaunched. */
+	struct bitcoin_txid *funding_spend_txid;
+
 	/* Our original funds, in funding amount */
 	struct amount_sat our_funds;
 

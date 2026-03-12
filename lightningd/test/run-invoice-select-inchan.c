@@ -688,9 +688,6 @@ void wallet_annotate_txout(struct wallet *w UNNEEDED,
 /* Generated stub for wallet_channel_save */
 void wallet_channel_save(struct wallet *w UNNEEDED, struct channel *chan UNNEEDED)
 { fprintf(stderr, "wallet_channel_save called!\n"); abort(); }
-/* Generated stub for wallet_del_funding_spend */
-void wallet_del_funding_spend(struct wallet *w UNNEEDED, const struct channel *chan UNNEEDED)
-{ fprintf(stderr, "wallet_del_funding_spend called!\n"); abort(); }
 /* Generated stub for wallet_del_tx_if_unreferenced */
 void wallet_del_tx_if_unreferenced(struct wallet *w UNNEEDED,
 				   const struct bitcoin_txid *txid UNNEEDED)

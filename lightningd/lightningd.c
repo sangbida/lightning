@@ -72,7 +72,6 @@
 #include <lightningd/hsm_control.h>
 #include <lightningd/io_loop_with_timers.h>
 #include <lightningd/lightningd.h>
-#include <lightningd/onchain_control.h>
 #include <lightningd/peer_htlcs.h>
 #include <lightningd/plugin_hook.h>
 #include <lightningd/runes.h>
@@ -1428,13 +1427,6 @@ int main(int argc, char *argv[])
 	 * scriptpubkey watches are initialized, otherwise peers may connect
 	 * and ask for uninitialized data. */
 	connectd_activate(ld);
-
-	/*~ "onchaind" is a dumb daemon which tries to get our funds back: it
-	 * doesn't handle reorganizations, but it's idempotent, so we can
-	 * simply just restart it if the chain moves.  On startup, restart
-	 * onchaind for any channels that have a recorded funding spend in
-	 * our_channel_txs (we crashed before fully processing the close). */
-	onchaind_restart_closed_channels(ld);
 
 	/*~ Now handle sigchld, so we can clean up appropriately. */
 	sigchld_conn = notleak(io_new_conn(ld, sigchld_rfd, sigchld_rfd_in, ld));
