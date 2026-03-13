@@ -553,11 +553,16 @@ void onchaind_clear_watches(struct channel *channel)
 
 	/* Remove the channel_close restart-marker watch first. */
 	if (channel->funding_spend_txid) {
-		watchman_unwatch_blockdepth(ld,
-					    owner_onchaind_channel_close(
-						    tmpctx, channel->dbid,
-						    channel->funding_spend_txid),
-					    *channel->close_blockheight);
+		u32 spend_blockheight = channel->close_blockheight
+			? *channel->close_blockheight
+			: wallet_transaction_height(ld->wallet,
+						    channel->funding_spend_txid);
+		if (spend_blockheight)
+			watchman_unwatch_blockdepth(ld,
+						    owner_onchaind_channel_close(
+							    tmpctx, channel->dbid,
+							    channel->funding_spend_txid),
+						    spend_blockheight);
 		channel->funding_spend_txid = tal_free(channel->funding_spend_txid);
 	}
 
@@ -581,11 +586,16 @@ static void handle_irrevocably_resolved(struct channel *channel, const u8 *msg U
 	/* Remove the channel_close restart-marker watch — onchaind is done,
 	 * so we no longer need to be able to restart it. */
 	if (channel->funding_spend_txid) {
-		watchman_unwatch_blockdepth(ld,
-					    owner_onchaind_channel_close(
-						    tmpctx, channel->dbid,
-						    channel->funding_spend_txid),
-					    *channel->close_blockheight);
+		u32 spend_blockheight = channel->close_blockheight
+			? *channel->close_blockheight
+			: wallet_transaction_height(ld->wallet,
+						    channel->funding_spend_txid);
+		if (spend_blockheight)
+			watchman_unwatch_blockdepth(ld,
+						    owner_onchaind_channel_close(
+							    tmpctx, channel->dbid,
+							    channel->funding_spend_txid),
+						    spend_blockheight);
 	}
 
 	/* Any remaining outpoint unwatches are idempotent (bwatch handles
@@ -1821,6 +1831,7 @@ void onchaind_channel_close_depth_found(struct lightningd *ld,
 	struct bitcoin_txid txid;
 	struct channel *channel;
 	struct bitcoin_tx *tx;
+	u32 spend_blockheight;
 
 	/* suffix is "<dbid>:<txid_hex>" */
 	txid_hex = strchr(suffix, ':');
@@ -1858,15 +1869,19 @@ void onchaind_channel_close_depth_found(struct lightningd *ld,
 		return;
 	}
 
-	if (!channel->close_blockheight) {
+	spend_blockheight = channel->close_blockheight
+		? *channel->close_blockheight
+		: wallet_transaction_height(ld->wallet, &txid);
+	if (!spend_blockheight) {
 		log_broken(channel->log,
-			   "onchaind/channel_close: no close_blockheight on channel");
+			   "onchaind/channel_close: spend blockheight not found for %s",
+			   fmt_bitcoin_txid(tmpctx, &txid));
 		return;
 	}
 
 	log_info(channel->log,
 		 "Restarting onchaind after crash (channel_close watch fired)");
-	onchaind_funding_spent(channel, tx, *channel->close_blockheight);
+	onchaind_funding_spent(channel, tx, spend_blockheight);
 }
 
 /* Revert handler: called when the block that confirmed the channel close is

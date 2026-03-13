@@ -2379,11 +2379,12 @@ void channel_funding_spent_watch_revert(struct lightningd *ld,
 	/* Kill onchaind. */
 	channel_set_owner(channel, NULL);
 
+	/* Remove all bwatch watches onchaind registered (must happen before
+	 * close_blockheight is cleared, as it may be needed for unwatch). */
+	onchaind_clear_watches(channel);
+
 	/* Clear the recorded close blockheight. */
 	channel->close_blockheight = tal_free(channel->close_blockheight);
-
-	/* Remove all bwatch watches onchaind registered. */
-	onchaind_clear_watches(channel);
 
 	/* Roll state back to CHANNELD_NORMAL.
 	 * channel_set_state calls wallet_channel_save internally. */

@@ -573,8 +573,8 @@ void bwatch_del_watch(struct command *cmd,
 					   confirm_height);
 
 	if (!w) {
-		plugin_log(cmd->plugin, LOG_BROKEN,
-			   "Attempted to remove non-existent %s watch",
+		plugin_log(cmd->plugin, LOG_DBG,
+			   "Attempted to remove non-existent %s watch (already gone)",
 			   bwatch_get_watch_type_name(type));
 		return;
 	}
