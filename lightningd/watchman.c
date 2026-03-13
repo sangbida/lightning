@@ -25,6 +25,7 @@
 #include <lightningd/jsonrpc.h>
 #include <lightningd/lightningd.h>
 #include <lightningd/log.h>
+#include <lightningd/coin_mvts.h>
 #include <lightningd/notification.h>
 #include <lightningd/onchain_control.h>
 #include <lightningd/peer_control.h>
@@ -742,6 +743,7 @@ static struct command_result *json_block_processed(struct command *cmd,
 		wm->last_processed_hash = *blockhash;
 		save_tip(wm);
 		notify_block_added(wm->ld, *blockheight, blockhash);
+		send_account_balance_snapshot(wm->ld);
 	}
 
 	channel_block_processed(wm->ld, *blockheight);
