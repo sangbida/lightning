@@ -1,4 +1,5 @@
 #include "config.h"
+#include <bitcoin/block.h>
 #include <ccan/cast/cast.h>
 #include <lightningd/channel.h>
 #include <lightningd/coin_mvts.h>
@@ -539,6 +540,19 @@ static void balance_snapshot_serialize(struct json_stream *stream,
 		json_object_end(stream);
 	}
 	json_array_end(stream);
+}
+
+REGISTER_NOTIFICATION(block_added);
+
+void notify_block_added(struct lightningd *ld, u32 height,
+			const struct bitcoin_blkid *blkid)
+{
+	struct jsonrpc_notification *n = notify_start(ld, "block_added");
+	if (!n)
+		return;
+	json_add_string(n->stream, "hash", fmt_bitcoin_blkid(n->stream, blkid));
+	json_add_u32(n->stream, "height", height);
+	notify_send(ld, n);
 }
 
 REGISTER_NOTIFICATION(balance_snapshot);

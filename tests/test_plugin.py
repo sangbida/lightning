@@ -3263,15 +3263,17 @@ def test_block_added_notifications(node_factory, bitcoind):
         os.path.join(os.getcwd(), "tests/plugins/block_added.py"),
     ]
     l1 = node_factory.get_node(options={"plugin": plugin})
+    l1.rpc.waitblockheight(blockheight=base)
     ret = l1.rpc.call("blockscatched")
     assert len(ret) == 1 and ret[0] == base + 0
 
     bitcoind.generate_block(2)
-    sync_blockheight(bitcoind, [l1])
+    l1.rpc.waitblockheight(blockheight=bitcoind.rpc.getblockchaininfo()["blocks"])
     ret = l1.rpc.call("blockscatched")
     assert len(ret) == 3 and ret[0] == base + 0 and ret[2] == base + 2
 
     l2 = node_factory.get_node(options={"plugin": plugin})
+    l2.rpc.waitblockheight(blockheight=bitcoind.rpc.getblockchaininfo()["blocks"])
     ret = l2.rpc.call("blockscatched")
     assert len(ret) == 1 and ret[0] == base + 2
 
@@ -3279,12 +3281,12 @@ def test_block_added_notifications(node_factory, bitcoind):
     next_l2_base = bitcoind.rpc.getblockchaininfo()["blocks"]
 
     bitcoind.generate_block(2)
-    sync_blockheight(bitcoind, [l1])
+    l1.rpc.waitblockheight(blockheight=bitcoind.rpc.getblockchaininfo()["blocks"])
     ret = l1.rpc.call("blockscatched")
     assert len(ret) == 5 and ret[4] == base + 4
 
     l2.start()
-    sync_blockheight(bitcoind, [l2])
+    l2.rpc.waitblockheight(blockheight=bitcoind.rpc.getblockchaininfo()["blocks"])
     ret = l2.rpc.call("blockscatched")
     assert len(ret) == 3 and ret[1] == next_l2_base + 1 and ret[2] == next_l2_base + 2
 

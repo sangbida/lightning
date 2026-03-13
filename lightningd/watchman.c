@@ -358,13 +358,21 @@ void watchman_replay_pending(struct lightningd *ld)
  * We use this to trigger pending-op replay the moment bwatch is truly ready. */
 static void watchman_on_plugin_ready(struct lightningd *ld, struct plugin *plugin)
 {
-	if (!ld->watchman)
+	struct watchman *wm = ld->watchman;
+
+	if (!wm)
 		return;
 	/* Check if this is bwatch by seeing if it owns the "addscriptpubkeywatch" method. */
 	if (find_plugin_for_command(ld, "addscriptpubkeywatch") != plugin)
 		return;
 	log_debug(ld->log, "bwatch reached INIT_COMPLETE, replaying pending ops");
 	watchman_replay_pending(ld);
+
+	/* Emit block_added for the persisted tip so plugins see the last known
+	 * block on startup, matching the old topology behaviour. */
+	if (wm->last_processed_height > 0)
+		notify_block_added(ld, wm->last_processed_height,
+				   &wm->last_processed_hash);
 }
 
 u32 get_block_height(struct lightningd *ld)
@@ -733,6 +741,7 @@ static struct command_result *json_block_processed(struct command *cmd,
 		wm->last_processed_height = *blockheight;
 		wm->last_processed_hash = *blockhash;
 		save_tip(wm);
+		notify_block_added(wm->ld, *blockheight, blockhash);
 	}
 
 	channel_block_processed(wm->ld, *blockheight);

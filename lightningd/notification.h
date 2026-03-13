@@ -7,6 +7,7 @@
 #include <lightningd/plugin.h>
 
 struct balance_snapshot;
+struct bitcoin_blkid;
 struct onionreply;
 struct wally_psbt;
 
@@ -94,6 +95,9 @@ void notify_channel_mvt(struct lightningd *ld,
 void notify_chain_mvt(struct lightningd *ld,
 		      const struct chain_coin_mvt *chain_mvt,
 		      u64 id);
+
+void notify_block_added(struct lightningd *ld, u32 height,
+			const struct bitcoin_blkid *blkid);
 
 void notify_balance_snapshot(struct lightningd *ld,
 			     const struct balance_snapshot *snap);
