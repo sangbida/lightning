@@ -23,6 +23,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <lightningd/bitcoind.h>
 #include <lightningd/io_loop_with_timers.h>
 #include <lightningd/notification.h>
 #include <lightningd/plugin.h>
@@ -1222,6 +1223,14 @@ static void plugin_rpcmethod_cb(const char *buffer,
 				struct command *cmd)
 {
 	struct json_stream *response;
+
+	/* Validate getchaininfo responses so we fatal() in lightningd,
+	 * not in the calling plugin (e.g. xpay), matching behavior when
+	 * lightningd's own code path receives the response. */
+	if (streq(cmd->json_cmd->name, "getchaininfo")
+	    && cmd->ld->bitcoind)
+		bitcoind_validate_getchaininfo_response(cmd->ld->bitcoind,
+							buffer, toks);
 
 	response = json_stream_raw_for_cmd(cmd);
 	json_stream_forward_change_id(response, buffer, toks, idtok, cmd->id);

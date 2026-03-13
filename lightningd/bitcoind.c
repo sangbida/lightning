@@ -90,6 +90,7 @@ void bitcoind_check_commands(struct bitcoind *bitcoind)
 		}
 		wait_plugin(bitcoind, methods[i], p);
 	}
+	log_debug(bitcoind->ld->log, "All Bitcoin plugin commands registered");
 }
 
 /* Our Bitcoin backend plugin gave us a bad response. We can't recover. */
@@ -478,6 +479,29 @@ void bitcoind_getrawblockbyheight_(const tal_t *ctx,
  *	"ibd": <synced?>
  * }
  */
+
+void bitcoind_validate_getchaininfo_response(struct bitcoind *bitcoind,
+					     const char *buf,
+					     const jsmntok_t *toks)
+{
+	const char *err, *chain;
+	u32 headers, blocks;
+	bool ibd;
+
+	/* Only validate when we have a result; error responses pass through */
+	if (!json_get_member(buf, toks, "result"))
+		return;
+
+	err = json_scan(tmpctx, buf, toks,
+			"{result:{chain:%,headercount:%,blockcount:%,ibd:%}}",
+			JSON_SCAN_TAL(tmpctx, json_strdup, &chain),
+			JSON_SCAN(json_to_number, &headers),
+			JSON_SCAN(json_to_number, &blocks),
+			JSON_SCAN(json_to_bool, &ibd));
+	if (err)
+		bitcoin_plugin_error(bitcoind, buf, toks, "getchaininfo",
+				     "bad 'result' field: %s", err);
+}
 
 struct getchaininfo_call {
 	struct bitcoind *bitcoind;

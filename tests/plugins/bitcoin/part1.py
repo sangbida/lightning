@@ -14,7 +14,7 @@ plugin = Plugin()
 @plugin.method("estimatefees")
 def getfeerate(plugin, **kwargs):
     time.sleep(1)
-    return {}
+    return {"feerate_floor": 1000, "feerates": []}
 
 
 @plugin.method("getrawblockbyheight")

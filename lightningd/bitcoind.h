@@ -2,6 +2,7 @@
 #define LIGHTNING_LIGHTNINGD_BITCOIND_H
 #include "config.h"
 #include <bitcoin/tx.h>
+#include <common/json_parse_simple.h>
 #include <ccan/list/list.h>
 #include <ccan/strmap/strmap.h>
 
@@ -158,5 +159,11 @@ void bitcoind_getutxout_(const tal_t *ctx,
 			    (arg))
 
 void bitcoind_check_commands(struct bitcoind *bitcoind);
+
+/* Validate getchaininfo response; calls fatal() if invalid. Used when
+ * plugins call getchaininfo via RPC so we fail in lightningd, not the plugin. */
+void bitcoind_validate_getchaininfo_response(struct bitcoind *bitcoind,
+					     const char *buf,
+					     const jsmntok_t *toks);
 
 #endif /* LIGHTNING_LIGHTNINGD_BITCOIND_H */
