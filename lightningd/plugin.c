@@ -1226,8 +1226,11 @@ static void plugin_rpcmethod_cb(const char *buffer,
 
 	/* Validate getchaininfo responses so we fatal() in lightningd,
 	 * not in the calling plugin (e.g. xpay), matching behavior when
-	 * lightningd's own code path receives the response. */
+	 * lightningd's own code path receives the response.
+	 * Skip when in check mode: the plugin returns {command_to_check:...} 
+	 * not the actual getchaininfo result. */
 	if (streq(cmd->json_cmd->name, "getchaininfo")
+	    && !command_check_only(cmd)
 	    && cmd->ld->bitcoind)
 		bitcoind_validate_getchaininfo_response(cmd->ld->bitcoind,
 							buffer, toks);
