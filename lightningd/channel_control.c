@@ -692,8 +692,6 @@ static void handle_splice_sending_sigs(struct lightningd *ld,
 			  cc ? REASON_USER : REASON_REMOTE,
 			  "Splice signatures sent");
 
-	/* bwatch's persistent channel/funding/<dbid> scriptpubkey watch catches
-	 * the splice tx via channel_funding_watch_found when it confirms. */
 	log_debug(channel->log, "Splice sigs sent, bwatch watching for %s",
 		  fmt_bitcoin_txid(tmpctx, &inflight->funding->outpoint.txid));
 }

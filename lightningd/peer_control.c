@@ -4085,7 +4085,7 @@ void channel_funding_depth_found(struct lightningd *ld,
 {
 	u64 dbid = strtoull(suffix, NULL, 10);
 	struct channel *channel = channel_by_dbid(ld, dbid);
-	u32 confirm_height, stop_depth;
+	u32 stop_depth;
 
 	if (!channel) {
 		log_debug(ld->log,
@@ -4118,52 +4118,24 @@ void channel_funding_depth_found(struct lightningd *ld,
 		break;
 	}
 
-	/* Stop once both lock-in and announce thresholds are satisfied. */
+	/* Stop the blockdepth watch once both lock-in and announce thresholds
+	 * are satisfied.  The scriptpubkey watch is intentionally kept alive:
+	 * a future splice tx creates an output with the same 2-of-2 P2WSH,
+	 * and channel_funding_watch_found / channel_splice_watch_found must
+	 * fire to drive the CHANNELD_AWAITING_SPLICE -> CHANNELD_NORMAL
+	 * transition. */
 	stop_depth = (channel->minimum_depth > ANNOUNCE_MIN_DEPTH)
 		     ? channel->minimum_depth : ANNOUNCE_MIN_DEPTH;
 	if (depth >= stop_depth) {
-		struct channel_inflight *inflight;
-		const char *owner = owner_channel_funding(tmpctx, dbid);
-
-		confirm_height = blockheight - depth + 1;
+		u32 confirm_height = blockheight - depth + 1;
 		watchman_unwatch_blockdepth(ld,
 					    owner_channel_funding_depth(tmpctx, dbid),
 					    confirm_height);
-
-		/* Retire all channel/funding scriptpubkey watches now that the
-		 * channel is buried deep enough that a reorg back to depth 0
-		 * is essentially impossible.  All dual-fund RBF candidates share
-		 * the same primary P2WSH; splice inflights with a distinct remote
-		 * key each get their own unwatch. */
-		{
-			const u8 *spk = funding_scriptpubkey(
-				tmpctx,
-				&channel->local_funding_pubkey,
-				&channel->channel_info.remote_fundingkey);
-			watchman_unwatch_scriptpubkey(ld, owner,
-						      spk, tal_count(spk));
-		}
-		list_for_each(&channel->inflights, inflight, list) {
-			const u8 *spk;
-
-			if (!inflight->funding->splice_remote_funding)
-				continue;
-			if (pubkey_eq(inflight->funding->splice_remote_funding,
-				      &channel->channel_info.remote_fundingkey))
-				continue;
-
-			spk = funding_scriptpubkey(
-				tmpctx,
-				&channel->local_funding_pubkey,
-				inflight->funding->splice_remote_funding);
-			watchman_unwatch_scriptpubkey(ld, owner,
-						      spk, tal_count(spk));
-		}
 	}
 }
 
-/* Reorg: remove the depth watch.  The scriptpubkey watch stays live until
- * stop_depth, so channel_funding_watch_found re-fires if the tx is re-mined. */
+/* Reorg: remove the depth watch.  The scriptpubkey watch stays live so
+ * channel_funding_watch_found re-fires if the tx is re-mined. */
 void channel_funding_depth_revert(struct lightningd *ld,
 				  const char *suffix,
 				  u32 blockheight)
