@@ -1075,6 +1075,12 @@ static void handle_peer_splice_locked(struct channel *channel, const u8 *msg)
 			    &inflight->funding->outpoint,
 			    inflight->locked_scid);
 
+	/* channel_splice_watch_found already set channel->scid to the splice
+	 * scid, so depthcb_update_scid returns "no change" and skips
+	 * channel_gossip_scid_changed.  Call it explicitly now that the
+	 * channel is about to enter CHANNELD_NORMAL. */
+	channel_gossip_scid_changed(channel);
+
 	/* That freed watchers in inflights: now watch funding tx */
 	channel_watch_funding(channel->peer->ld, channel);
 

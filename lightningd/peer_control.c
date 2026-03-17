@@ -2542,7 +2542,16 @@ static bool channel_splice_watch_found(struct lightningd *ld,
 		channel->funding = inflight->funding->outpoint;
 		wallet_annotate_txout(ld->wallet, &channel->funding,
 				      TX_CHANNEL_FUNDING, channel->dbid);
-		channel_set_scid(channel, scid);
+		/* Register old scid as alias so routing via the old scid works
+		 * immediately.  channel_set_scid removes the old entry from the
+		 * map first, so channel_add_old_scid must come after it. */
+		if (channel->scid) {
+			struct short_channel_id old_scid = *channel->scid;
+			channel_set_scid(channel, scid);
+			channel_add_old_scid(channel, old_scid);
+		} else {
+			channel_set_scid(channel, scid);
+		}
 		wallet_channel_save(ld->wallet, channel);
 
 		/* Watch new funding outpoint for spends (same owner). */
