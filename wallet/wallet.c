@@ -4626,7 +4626,7 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 				   const struct bitcoin_tx *tx,
 				   size_t innum UNUSED,
 				   u32 blockheight,
-				   u32 txindex UNUSED)
+				   u32 txindex)
 {
 	struct bitcoin_outpoint outpoint;
 	struct db_stmt *stmt;
@@ -4651,6 +4651,10 @@ void wallet_utxo_spent_watch_found(struct lightningd *ld,
 	db_bind_txid(stmt, &outpoint.txid);
 	db_bind_int(stmt, outpoint.n);
 	db_exec_prepared_v2(take(stmt));
+
+	/* Update the spending tx's confirmed blockheight in our_txs so that
+	 * listtransactions shows the correct confirmation height. */
+	wallet_transaction_add(ld->wallet, tx->wtx, blockheight, txindex);
 
 	wallet_record_spend(ld, &outpoint, &spending_txid, blockheight);
 }
