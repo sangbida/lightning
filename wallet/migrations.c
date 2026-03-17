@@ -21,9 +21,9 @@ void migrate_backfill_bwatch_tables(struct lightningd *ld, struct db *db)
 {
 	struct db_stmt *stmt;
 
-	/* Backfill old utxoset → our_outputs row by row so we can derive and
-	 * store the HD keyindex for each scriptpubkey.  bip32_base is already
-	 * populated at migration time (HSM starts before wallet_new). */
+	/* Backfill wallet-owned outputs from old utxoset (which stored all
+	 * watched outputs) into our_outputs.  Skip anything we can't derive
+	 * an HD keyindex for — those are channel or gossip outputs, not ours. */
 	stmt = db_prepare_v2(db,
 		SQL("SELECT txid, outnum, blockheight, txindex, "
 		    "       scriptpubkey, satoshis, spendheight "
@@ -41,16 +41,21 @@ void migrate_backfill_bwatch_tables(struct lightningd *ld, struct db *db)
 		const u8 *script = db_col_arr(tmpctx, stmt, "scriptpubkey", u8);
 		size_t script_len = tal_bytelen(script);
 		u32 keyindex;
-		bool have_keyidx;
 
 		db_col_txid(stmt, "txid", &txid);
 		outnum      = db_col_int(stmt, "outnum");
 		blockheight = db_col_int(stmt, "blockheight");
 		sat         = db_col_amount_sat(stmt, "satoshis");
 
-		have_keyidx = wallet_scriptpubkey_to_keyidx(ld, db,
-							    script, script_len,
-							    &keyindex, NULL);
+		/* Skip non-wallet outputs: channel funding outputs, gossip
+		 * watches, etc. will not match any HD-derived key. */
+		if (!wallet_scriptpubkey_to_keyidx(ld, db,
+						   script, script_len,
+						   &keyindex, NULL)) {
+			db_col_ignore(stmt, "txindex");
+			db_col_ignore(stmt, "spendheight");
+			continue;
+		}
 
 		ins = db_prepare_v2(db,
 			SQL("INSERT OR IGNORE INTO our_outputs "
@@ -70,10 +75,7 @@ void migrate_backfill_bwatch_tables(struct lightningd *ld, struct db *db)
 			db_bind_null(ins);
 		else
 			db_bind_int(ins, db_col_int(stmt, "spendheight"));
-		if (have_keyidx)
-			db_bind_int(ins, keyindex);
-		else
-			db_bind_null(ins);
+		db_bind_int(ins, keyindex);
 		db_exec_prepared_v2(take(ins));
 	}
 	tal_free(stmt);
