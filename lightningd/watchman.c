@@ -355,8 +355,8 @@ void watchman_replay_pending(struct lightningd *ld)
 	}
 }
 
-/* Called by plugin machinery when any plugin hits INIT_COMPLETE.
- * We use this to trigger pending-op replay the moment bwatch is truly ready. */
+/* Replay pending ops when bwatch is ready.  On a fresh node current_height
+ * is still 0, so we defer to json_block_processed where it's guaranteed > 0. */
 static void watchman_on_plugin_ready(struct lightningd *ld, struct plugin *plugin)
 {
 	struct watchman *wm = ld->watchman;
@@ -366,14 +366,14 @@ static void watchman_on_plugin_ready(struct lightningd *ld, struct plugin *plugi
 	/* Check if this is bwatch by seeing if it owns the "addscriptpubkeywatch" method. */
 	if (find_plugin_for_command(ld, "addscriptpubkeywatch") != plugin)
 		return;
-	log_debug(ld->log, "bwatch reached INIT_COMPLETE, replaying pending ops");
-	watchman_replay_pending(ld);
 
-	/* Emit block_added for the persisted tip so plugins see the last known
-	 * block on startup, matching the old topology behaviour. */
-	if (wm->last_processed_height > 0)
+	if (wm->last_processed_height > 0) {
+		log_debug(ld->log, "bwatch reached INIT_COMPLETE, replaying pending ops (height=%u)",
+			  wm->last_processed_height);
+		watchman_replay_pending(ld);
 		notify_block_added(ld, wm->last_processed_height,
 				   &wm->last_processed_hash);
+	}
 }
 
 u32 get_block_height(struct lightningd *ld)
@@ -739,6 +739,15 @@ static struct command_result *json_block_processed(struct command *cmd,
 	if (*blockheight != wm->last_processed_height) {
 		log_debug(wm->ld->log, "block_processed: %u -> %u",
 			  wm->last_processed_height, *blockheight);
+
+		/* Fresh node: replay wallet watches now that bwatch->current_height > 0,
+		 * so add_watch_and_maybe_rescan will trigger historical rescans. */
+		if (wm->last_processed_height == 0) {
+			log_debug(wm->ld->log,
+				  "First block_processed on fresh node, replaying pending ops");
+			watchman_replay_pending(wm->ld);
+		}
+
 		wm->last_processed_height = *blockheight;
 		wm->last_processed_hash = *blockhash;
 		save_tip(wm);
