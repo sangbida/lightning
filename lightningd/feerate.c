@@ -350,7 +350,7 @@ static struct command_result *json_feerates(struct command *cmd,
 			     feerate_to_style(rate, *style));
 	rate = unilateral_feerate(ld, true);
 	if (rate)
-		json_add_num(response, "unilateral_close",
+		json_add_num(response, "unilateral_anchor_close",
 			     feerate_to_style(rate, *style));
 	rate = penalty_feerate(ld);
 	if (rate)
