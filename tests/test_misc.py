@@ -3919,12 +3919,25 @@ def test_datastore_escapeing(node_factory):
     assert getdata == setdata
 
 
+def listdatastore_user(node):
+    """listdatastore() filtered to exclude plugin-internal namespaces.
+
+    bwatch and watchman both write to the datastore for internal bookkeeping
+    (block-watch state and pending watch ops respectively).  Tests that check
+    the full store contents need to strip those entries out.
+    """
+    return {'datastore': [e for e in node.rpc.listdatastore()['datastore']
+                          if e['key'][0] not in {'bwatch', 'watchman'}]}
+
+
 def test_datastore(node_factory):
-    # Suppress xpay and bookkeeper which use the datastore
-    l1 = node_factory.get_node(options={"disable-plugin": ["cln-xpay", "bookkeeper", "bwatch"]})
+    # Suppress xpay and bookkeeper which use the datastore; bwatch/watchman are
+    # required for block tracking and write their own entries (filtered via
+    # listdatastore_user).
+    l1 = node_factory.get_node(options={"disable-plugin": ["cln-xpay", "bookkeeper"]})
 
     # Starts empty
-    assert l1.rpc.listdatastore() == {'datastore': []}
+    assert listdatastore_user(l1) == {'datastore': []}
     assert l1.rpc.listdatastore('somekey') == {'datastore': []}
 
     # Fail on empty array
@@ -3944,7 +3957,7 @@ def test_datastore(node_factory):
 
     assert l1.rpc.datastore(key='somekey', hex=somedata) == somedata_expect
 
-    assert l1.rpc.listdatastore() == {'datastore': [somedata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [somedata_expect]}
     assert l1.rpc.listdatastore('somekey') == {'datastore': [somedata_expect]}
     assert l1.rpc.listdatastore('otherkey') == {'datastore': []}
 
@@ -3966,7 +3979,7 @@ def test_datastore(node_factory):
 
     # Generation will have increased due to three ops above.
     somedata_expect['generation'] += 3
-    assert l1.rpc.listdatastore() == {'datastore': [somedata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [somedata_expect]}
 
     # Can't replace or append non-existing records if we say not to
     with pytest.raises(RpcError, match='does not exist'):
@@ -3987,14 +4000,14 @@ def test_datastore(node_factory):
     assert l1.rpc.listdatastore('badkey') == {'datastore': []}
 
     # Order is sorted!
-    assert l1.rpc.listdatastore() == {'datastore': [otherdata_expect, somedata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [otherdata_expect, somedata_expect]}
 
     assert l1.rpc.deldatastore('somekey') == somedata_expect
-    assert l1.rpc.listdatastore() == {'datastore': [otherdata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [otherdata_expect]}
     assert l1.rpc.listdatastore('somekey') == {'datastore': []}
     assert l1.rpc.listdatastore('otherkey') == {'datastore': [otherdata_expect]}
     assert l1.rpc.listdatastore('badkey') == {'datastore': []}
-    assert l1.rpc.listdatastore() == {'datastore': [otherdata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [otherdata_expect]}
 
     # if it's not a string, won't print
     badstring_expect = {'key': ['badstring'],
@@ -4007,7 +4020,7 @@ def test_datastore(node_factory):
     # It's persistent
     l1.restart()
 
-    assert l1.rpc.listdatastore() == {'datastore': [otherdata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [otherdata_expect]}
 
     # We can insist generation match on update.
     with pytest.raises(RpcError, match='generation is different'):
@@ -4021,7 +4034,7 @@ def test_datastore(node_factory):
                              mode='must-replace',
                              generation=otherdata_expect['generation'] - 1)
             == otherdata_expect)
-    assert l1.rpc.listdatastore() == {'datastore': [otherdata_expect]}
+    assert listdatastore_user(l1) == {'datastore': [otherdata_expect]}
 
     # We can insist generation match on delete.
     with pytest.raises(RpcError, match='generation is different'):
@@ -4031,15 +4044,17 @@ def test_datastore(node_factory):
     assert (l1.rpc.deldatastore(key='otherkey',
                                 generation=otherdata_expect['generation'])
             == otherdata_expect)
-    assert l1.rpc.listdatastore() == {'datastore': []}
+    assert listdatastore_user(l1) == {'datastore': []}
 
 
 def test_datastore_keylist(node_factory):
-    # Suppress xpay and bookkeeper which use the datastore
-    l1 = node_factory.get_node(options={"disable-plugin": ["cln-xpay", "bookkeeper", "bwatch"]})
+    # Suppress xpay and bookkeeper which use the datastore; bwatch/watchman are
+    # required for block tracking and write their own entries (filtered via
+    # listdatastore_user).
+    l1 = node_factory.get_node(options={"disable-plugin": ["cln-xpay", "bookkeeper"]})
 
     # Starts empty
-    assert l1.rpc.listdatastore() == {'datastore': []}
+    assert listdatastore_user(l1) == {'datastore': []}
     assert l1.rpc.listdatastore(['a']) == {'datastore': []}
     assert l1.rpc.listdatastore(['a', 'b']) == {'datastore': []}
 
@@ -4054,7 +4069,7 @@ def test_datastore_keylist(node_factory):
 
     # Create child key.
     l1.rpc.datastore(key=['a', 'b'], string='abval')
-    assert l1.rpc.listdatastore() == {'datastore': [{'key': ['a']}]}
+    assert listdatastore_user(l1) == {'datastore': [{'key': ['a']}]}
     assert l1.rpc.listdatastore(key=['a']) == {'datastore': [{'key': ['a', 'b'],
                                                               'generation': 0,
                                                               'string': 'abval',
@@ -4066,7 +4081,7 @@ def test_datastore_keylist(node_factory):
 
     # Can create another key.
     l1.rpc.datastore(key=['a', 'b2'], string='ab2val')
-    assert l1.rpc.listdatastore() == {'datastore': [{'key': ['a']}]}
+    assert listdatastore_user(l1) == {'datastore': [{'key': ['a']}]}
     assert l1.rpc.listdatastore(key=['a']) == {'datastore': [{'key': ['a', 'b'],
                                                               'string': 'abval',
                                                               'generation': 0,
@@ -4078,7 +4093,7 @@ def test_datastore_keylist(node_factory):
 
     # Can create subkey.
     l1.rpc.datastore(key=['a', 'b3', 'c'], string='ab2val')
-    assert l1.rpc.listdatastore() == {'datastore': [{'key': ['a']}]}
+    assert listdatastore_user(l1) == {'datastore': [{'key': ['a']}]}
     assert l1.rpc.listdatastore(key=['a']) == {'datastore': [{'key': ['a', 'b'],
                                                               'string': 'abval',
                                                               'generation': 0,
@@ -4098,25 +4113,25 @@ def test_datastore_keylist(node_factory):
 
 
 def test_datastoreusage(node_factory):
-    # Suppress xpay and bookkeeper which use the datastore
-    l1: LightningNode = node_factory.get_node(options={"disable-plugin": ["cln-xpay", "bookkeeper", "bwatch"]})
-    assert l1.rpc.datastoreusage() == {'datastoreusage': {'key': '[]', 'total_bytes': 0}}
+    # Suppress xpay and bookkeeper which use the datastore; bwatch/watchman are
+    # required but write concurrently, so avoid global totals and use scoped keys.
+    l1: LightningNode = node_factory.get_node(options={"disable-plugin": ["cln-xpay", "bookkeeper"]})
+    assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': 0}}
 
     data = 'somedatatostoreinthedatastore'  # len 29
     l1.rpc.datastore(key=["a", "b"], string=data)
-    assert l1.rpc.datastoreusage() == {'datastoreusage': {'key': '[]', 'total_bytes': (29 + 1 + 1 + 1)}}
     assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': (29 + 1 + 1 + 1)}}
     assert l1.rpc.datastoreusage(key=["a", "b"]) == {'datastoreusage': {'key': '[a,b]', 'total_bytes': (29 + 1 + 1 + 1)}}
 
     # add second leaf
     l1.rpc.datastore(key=["a", "c"], string=data)
-    assert l1.rpc.datastoreusage() == {'datastoreusage': {'key': '[]', 'total_bytes': (29 + 1 + 1 + 1 + 29 + 1 + 1 + 1)}}
+    assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': (29 + 1 + 1 + 1 + 29 + 1 + 1 + 1)}}
     assert l1.rpc.datastoreusage(key=["a", "b"]) == {'datastoreusage': {'key': '[a,b]', 'total_bytes': (29 + 1 + 1 + 1)}}
     assert l1.rpc.datastoreusage(key=["a", "c"]) == {'datastoreusage': {'key': '[a,c]', 'total_bytes': (29 + 1 + 1 + 1)}}
 
     # check that the key is also counted as stored data
     l1.rpc.datastore(key=["a", "thisissomelongkeythattriestostore46bytesofdata"], string=data)
-    assert l1.rpc.datastoreusage() == {'datastoreusage': {'key': '[]', 'total_bytes': (29 + 1 + 1 + 46 + 64)}}
+    assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': (29 + 1 + 1 + 46 + 64)}}
     assert l1.rpc.datastoreusage(key=["a", "thisissomelongkeythattriestostore46bytesofdata"]) == {'datastoreusage': {'key': '[a,thisissomelongkeythattriestostore46bytesofdata]', 'total_bytes': (29 + 1 + 1 + 46)}}
 
     # check that the root is also counted
@@ -4126,7 +4141,7 @@ def test_datastoreusage(node_factory):
     # check really deep data
     l1.rpc.datastore(key=["a", "d", "e", "f", "g"], string=data)
     assert l1.rpc.datastoreusage(key=["a", "d", "e", "f", "g"]) == {'datastoreusage': {'key': '[a,d,e,f,g]', 'total_bytes': (29 + 1 + 1 + 1 + 1 + 1 + 4)}}
-    assert l1.rpc.datastoreusage() == {'datastoreusage': {'key': '[]', 'total_bytes': (29 + 1 + 1 + 1 + 1 + 1 + 4 + 218)}}
+    assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': (29 + 1 + 1 + 1 + 1 + 1 + 4 + 218)}}
 
 
 @unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3',
