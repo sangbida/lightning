@@ -2942,7 +2942,9 @@ type_ok:
 	watchman_watch_outpoint(w->ld,
 				owner_wallet_utxo(tmpctx, &utxo->outpoint),
 				&utxo->outpoint,
-				blockheight ? *blockheight : 0);
+				(blockheight && *blockheight > 0)
+				    ? *blockheight
+				    : get_block_height(w->ld));
 
 	/* This is an unconfirmed change output, we should track it */
 	if (utxo->utxotype != UTXO_P2SH_P2WPKH && !blockheight) {
@@ -3101,16 +3103,9 @@ void wallet_del_tx_if_unreferenced(struct wallet *w,
 				   const struct bitcoin_txid *txid)
 {
 	struct db_stmt *stmt = db_prepare_v2(w->db,
-		SQL("SELECT 1 FROM our_outputs WHERE txid = ? LIMIT 1"));
+		SQL("DELETE FROM our_txs WHERE txid = ?"
+		    " AND NOT EXISTS (SELECT 1 FROM our_outputs WHERE txid = ?)"));
 	db_bind_txid(stmt, txid);
-	db_query_prepared(stmt);
-	if (db_step(stmt)) {
-		tal_free(stmt);
-		return; /* Other outputs still reference this tx — keep it. */
-	}
-	tal_free(stmt);
-
-	stmt = db_prepare_v2(w->db, SQL("DELETE FROM our_txs WHERE txid = ?"));
 	db_bind_txid(stmt, txid);
 	db_exec_prepared_v2(take(stmt));
 }

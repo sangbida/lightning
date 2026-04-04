@@ -10,7 +10,6 @@
 #include <common/json_stream.h>
 #include <plugins/bwatch/bwatch_wiregen.h>
 #include <plugins/libplugin.h>
-
 /*
  * ============================================================================
  * SENDING WATCH_FOUND NOTIFICATIONS	
@@ -618,6 +617,12 @@ static struct command_result *getwatchmanheight_done(struct command *cmd,
 			   bwatch->current_height, watchman_height);
 		while (bwatch->current_height > watchman_height)
 			bwatch_remove_tip(cmd, bwatch);
+		if (bwatch->current_height < watchman_height) {
+			plugin_log(cmd->plugin, LOG_DBG,
+				   "Rollback undershot to %u (shallow history); resuming from watchman height %u",
+				   bwatch->current_height, watchman_height);
+			bwatch->current_height = watchman_height;
+		}
 	}
 
 	plugin_log(cmd->plugin, LOG_INFORM,

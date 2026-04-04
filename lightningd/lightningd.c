@@ -71,6 +71,7 @@
 #include <lightningd/gossip_control.h>
 #include <lightningd/hsm_control.h>
 #include <lightningd/io_loop_with_timers.h>
+#include <lightningd/jsonrpc.h>
 #include <lightningd/lightningd.h>
 #include <lightningd/peer_htlcs.h>
 #include <lightningd/plugin_hook.h>
@@ -688,7 +689,12 @@ static void init_wallet_scriptpubkey_watches(struct wallet *w,
 		if (bip32_key_from_parent(bip32_base, i, BIP32_FLAG_KEY_PUBLIC, &ext) != WALLY_OK) {
 			abort();
 		}
-		wallet_add_bwatch_derkey(w->ld, i, get_block_height(w->ld), ext.pub_key);
+		/* On a fresh node get_block_height is 0 (before any blocks are processed).
+		 * UINT32_MAX signals bwatch to register the watch but not rescan. */
+		u32 key_start = get_block_height(w->ld);
+		wallet_add_bwatch_derkey(w->ld, i,
+					 key_start ? key_start : UINT32_MAX,
+					 ext.pub_key);
 	}
 
 	/* If BIP86 is enabled, also add BIP86-derived keys as watches */
@@ -697,7 +703,8 @@ static void init_wallet_scriptpubkey_watches(struct wallet *w,
 	for (u64 i = 0; i <= bip86_max_index + w->keyscan_gap; i++) {
 		struct pubkey pubkey;
 		u8 *p2tr_script, *p2wpkh_script;
-		u32 start_block = get_block_height(w->ld);
+		u32 key_start = get_block_height(w->ld);
+		u32 start_block = key_start ? key_start : UINT32_MAX;
 
 		bip86_pubkey(w->ld, &pubkey, i);
 		/* Add both P2TR and P2WPKH scripts since BIP86 keys can be used for both */
@@ -1534,6 +1541,10 @@ stop:
 
 	/* Tell plugins we're shutting down, use force if necessary. */
 	shutdown_plugins(ld);
+
+	/* Deferred from json_recover: move files now that plugins are gone. */
+	if (ld->recover_secret)
+		move_prerecover_files(tal_fmt(tmpctx, "lightning.pre-recover.%u", getpid()));
 
 	/* Now kill any remaining connections */
 	jsonrpc_stop_all(ld);

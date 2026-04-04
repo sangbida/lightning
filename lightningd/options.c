@@ -996,8 +996,8 @@ static const struct config testnet_config = {
 	/* Testnet sucks */
 	.ignore_fee_limits = true,
 
-	/* Rescan 5 hours of blocks on testnet, it's reorg happy */
-	.rescan = 30,
+	/* bwatch tracks chain state persistently; no automatic startup rescan needed. */
+	.rescan = 0,
 
 	.use_dns = true,
 
@@ -1074,8 +1074,8 @@ static const struct config mainnet_config = {
 	/* Mainnet should have more stable fees */
 	.ignore_fee_limits = false,
 
-	/* Rescan 2.5 hours of blocks on startup, it's not so reorg happy */
-	.rescan = 15,
+	/* bwatch tracks chain state persistently; no automatic startup rescan needed. */
+	.rescan = 0,
 
 	.use_dns = true,
 
@@ -1520,8 +1520,9 @@ static void register_opts(struct lightningd *ld)
 			 "Millisatoshi minimum to charge for HTLC");
 	clnopt_witharg("--rescan", OPT_SHOWINT, opt_set_s32, opt_show_s32,
 			 &ld->config.rescan,
-			 "Number of blocks to rescan from the current head, or "
-			 "absolute blockheight if negative");
+			 "Number of blocks to rescan from the current head on startup "
+			 "(default 0: bwatch resumes from last known height); "
+			 "negative value means absolute blockheight");
 	clnopt_witharg("--fee-per-satoshi", OPT_SHOWINT, opt_set_u32, opt_show_u32,
 			 &ld->config.fee_per_satoshi,
 			 "Microsatoshi fee for every satoshi in HTLC");

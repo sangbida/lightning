@@ -300,7 +300,8 @@ void channel_set_scid(struct channel *channel, const struct short_channel_id *ne
 
 	/* Get rid of old one (if any) */
 	if (channel->scid != NULL) {
-		chanmap_remove(ld, channel, *channel->scid);
+		if (!is_stub_scid(*channel->scid))
+			chanmap_remove(ld, channel, *channel->scid);
 		channel->scid = tal_free(channel->scid);
 	}
 

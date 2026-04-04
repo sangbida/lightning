@@ -718,11 +718,13 @@ const u8 *send_htlc_out(const tal_t *ctx,
 							channel_update_for_error(tmpctx, out));
 	}
 
-	if (!out->peer->ld->bitcoind->synced) {
-		log_debug(out->log, "Sending HTLC while bitcoind still syncing"
-			  " (block %u)",
-			  get_block_height(out->peer->ld));
-	}
+	if (out->peer->ld->watchman->last_processed_height
+	    < out->peer->ld->watchman->bitcoind_blockcount)
+		log_debug(out->log,
+			 "Sending HTLC while still syncing with bitcoin network"
+			 " (%u vs %u)",
+			 out->peer->ld->watchman->last_processed_height,
+			 out->peer->ld->watchman->bitcoind_blockcount);
 
 	/* Make peer's daemon own it, catch if it dies. */
 	*houtp = new_htlc_out(out->owner, out, amount, cltv,

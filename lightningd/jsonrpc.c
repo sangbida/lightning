@@ -258,7 +258,7 @@ static struct command_result *param_hsm_secret(struct command *cmd,
 }
 
 /* We cannot --recover unless these files are not in place. */
-static void move_prerecover_files(const char *dir)
+void move_prerecover_files(const char *dir)
 {
 	const char *files[] = {
 		"lightningd.sqlite3",
@@ -316,8 +316,6 @@ static struct command_result *json_recover(struct command *cmd,
 	dir = tal_fmt(tmpctx, "lightning.pre-recover.%u", getpid());
 	log_unusual(cmd->ld->log,
 		    "JSON-RPC recovery command: moving existing files to %s", dir);
-
-	move_prerecover_files(dir);
 
 	/* Top level with add --recover=... here */
 	cmd->ld->recover_secret = tal_steal(cmd->ld, hsm_secret);

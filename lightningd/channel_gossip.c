@@ -950,6 +950,25 @@ void channel_gossip_init(struct channel *channel,
 	check_channel_gossip(channel);
 }
 
+/* Funding tx was reorged out: reset gossip state to match reality.
+ * No legal backward transition exists in the state machine, so we
+ * bypass it and re-derive from the current channel properties.
+ * Also clears any remote announcement sigs tied to the old scid. */
+void channel_gossip_funding_reorg(struct channel *channel)
+{
+	struct channel_gossip *cg = channel->channel_gossip;
+	if (!cg)
+		return;
+
+	/* Remote sigs reference the old scid; discard them. */
+	cg->remote_sigs = tal_free(cg->remote_sigs);
+
+	cg->state = derive_channel_state(channel);
+	log_debug(channel->log,
+		  "channel_gossip: reset to %s after funding reorg",
+		  channel_gossip_state_str(cg->state));
+}
+
 /* Something about channel changed: update if required */
 void channel_gossip_update(struct channel *channel)
 {

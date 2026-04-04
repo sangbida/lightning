@@ -208,6 +208,11 @@ void jsonrpc_stop_listening(struct jsonrpc *jsonrpc);
 void jsonrpc_stop_all(struct lightningd *ld);
 
 /**
+ * Move pre-recover files (sqlite3, hsm_secret, emergency.recover) into dir.
+ */
+void move_prerecover_files(const char *dir);
+
+/**
  * Add a new command/method to the JSON-RPC interface.
  *
  * Returns true if the command was added correctly, false if adding

@@ -516,19 +516,32 @@ struct watch *bwatch_add_watch(struct command *cmd,
 					   confirm_height);
 
 	if (w) {
-		/* Existing watch: just add owner. The hash table pointer already
-		 * points to w, so mutating w->owners is visible without re-adding. */
+		/* Existing watch: add owner if new, update start_block if lower. */
+		bool found_owner = false;
+		bool lowered = start_block < w->start_block;
 		for (size_t i = 0; i < tal_count(w->owners); i++) {
 			if (streq(w->owners[i], owner_id)) {
+				found_owner = true;
+				break;
+			}
+		}
+		if (lowered)
+			w->start_block = start_block;
+		if (!found_owner)
+			tal_arr_expand(&w->owners, tal_strdup(w->owners, owner_id));
+		bwatch_save_watch_to_datastore(cmd, w);
+		/* Return NULL only if owner was already registered AND start_block
+		 * didn't drop — no new territory to scan, so no rescan needed. */
+		if (found_owner && !lowered) {
 			plugin_log(cmd->plugin, LOG_DBG,
 				   "Owner %s already watching", owner_id);
 			return NULL;
-			}
 		}
-		if (start_block < w->start_block)
-			w->start_block = start_block;
-		tal_arr_expand(&w->owners, tal_strdup(w->owners, owner_id));
-		bwatch_save_watch_to_datastore(cmd, w);
+		plugin_log(cmd->plugin, LOG_DBG,
+			   found_owner
+			   ? "Owner %s already watching, lowering start_block to %u"
+			   : "Owner %s added to existing watch, start_block %u",
+			   owner_id, w->start_block);
 		return w;
 	}
 

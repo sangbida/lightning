@@ -152,6 +152,29 @@ static void load_pending_ops(struct watchman *wm)
 
 static void watchman_on_plugin_ready(struct lightningd *ld, struct plugin *plugin);
 
+/* Apply --rescan: negative means absolute height (only go back),
+ * positive means relative (go back N blocks from stored tip). */
+static void apply_rescan(struct watchman *wm, struct lightningd *ld)
+{
+	u32 stored = wm->last_processed_height;
+	u32 target;
+
+	if (ld->config.rescan < 0)
+		target = (u32)(-ld->config.rescan);  /* absolute height */
+	else if (stored > (u32)ld->config.rescan)
+		target = stored - (u32)ld->config.rescan;  /* go back N blocks */
+	else
+		target = 0;  /* rescan exceeds stored height, start from genesis */
+
+	/* Only adjust downward; upward targets are validated later in chaininfo */
+	if (target < stored) {
+		log_debug(ld->log,
+			 "Rescanning: adjusting watchman height from %u to %u",
+			 stored, target);
+		wm->last_processed_height = target;
+	}
+}
+
 struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld)
 {
 	struct watchman *wm = talz(ctx, struct watchman);
@@ -162,6 +185,7 @@ struct watchman *watchman_new(const tal_t *ctx, struct lightningd *ld)
 	load_pending_ops(wm);
 	/* Load persisted tip (height + hash) from the SQL vars table. */
 	load_tip(wm);
+	apply_rescan(wm, ld);
 
 	log_info(ld->log, "Watchman: height=%u, %zu pending ops",
 		 wm->last_processed_height, tal_count(wm->pending_ops));
@@ -737,8 +761,8 @@ static struct command_result *json_block_processed(struct command *cmd,
 		return command_fail(cmd, LIGHTNINGD, "Watchman not initialized");
 
 	if (*blockheight != wm->last_processed_height) {
-		log_debug(wm->ld->log, "block_processed: %u -> %u",
-			  wm->last_processed_height, *blockheight);
+		log_info(wm->ld->log, "block_processed: %u -> %u",
+			 wm->last_processed_height, *blockheight);
 
 		/* Fresh node: replay wallet watches now that bwatch->current_height > 0,
 		 * so add_watch_and_maybe_rescan will trigger historical rescans. */
@@ -871,8 +895,12 @@ static struct command_result *json_chaininfo(struct command *cmd,
 			    *blockcount, *headercount);
 		cmd->ld->bitcoind->synced = false;
 	} else {
+		if (!cmd->ld->bitcoind->synced)
+			log_info(cmd->ld->log, "Bitcoin backend now synced");
 		cmd->ld->bitcoind->synced = true;
 	}
+	
+	cmd->ld->watchman->bitcoind_blockcount = *blockcount;
 
 	struct json_stream *response = json_stream_success(cmd);
 	json_add_string(response, "chain", chain);

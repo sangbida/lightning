@@ -19,6 +19,7 @@ struct watchman {
 	struct lightningd *ld;
 	u32 last_processed_height;
 	struct bitcoin_blkid last_processed_hash;
+	u32 bitcoind_blockcount;
 	struct pending_op **pending_ops;
 
 	/* Feerate estimation state (updated per-block via block_processed) */

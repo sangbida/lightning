@@ -2372,6 +2372,30 @@ void channel_funding_spent_watch_revert(struct lightningd *ld,
 		return;
 	}
 
+	/* bwatch fires the spend-watch revert whenever the funding confirmation
+	 * block is reorged, regardless of whether the outpoint was ever actually
+	 * spent (start_block is set to the confirmation height, not the spend
+	 * height).  If we have no record of a spending tx the watch never fired
+	 * and there is nothing to roll back. */
+	if (!channel->funding_spend_txid) {
+		log_debug(channel->log,
+			  "Funding spend revert at block %u in state %s: "
+			  "outpoint never spent, ignoring",
+			  blockheight, channel_state_name(channel));
+		return;
+	}
+
+	/* If we're already ONCHAIN, this revert is almost certainly a spurious
+	 * bwatch startup rollback (watchman height < bwatch stored tip), not a
+	 * real chain reorg of the funding-spend tx. It would probably be real bad if an
+	 * an actual deep reorg happened but things should probably break if it did. */
+	if (channel->state == ONCHAIN) {
+		log_unusual(channel->log,
+			    "Funding spend revert at block %u while ONCHAIN: ignoring (likely startup resync, not a real reorg)",
+			    blockheight);
+		return;
+	}
+
 	log_unusual(channel->log,
 		    "Funding spend reorged out at block %u (state %s) — rolling back",
 		    blockheight, channel_state_name(channel));
@@ -2385,6 +2409,10 @@ void channel_funding_spent_watch_revert(struct lightningd *ld,
 
 	/* Clear the recorded close blockheight. */
 	channel->close_blockheight = tal_free(channel->close_blockheight);
+
+	/* Reset gossip before channel_set_state saves: no legal backward
+	 * transition exists from the dead (ONCHAIN) gossip state. */
+	channel_gossip_funding_reorg(channel);
 
 	/* Roll state back to CHANNELD_NORMAL.
 	 * channel_set_state calls wallet_channel_save internally. */
@@ -2472,7 +2500,7 @@ void channel_unwatch_funding(struct lightningd *ld, struct channel *channel)
 
 void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 {
-	if (!channel->scid || is_stub_scid(*channel->scid)) {
+	if (!channel->scid) {
 		/* Funding tx not yet on-chain: register a scriptpubkey watch so
 		 * bwatch tells us when it confirms (fires channel_funding_watch_found). */
 		const u8 *scriptpubkey = funding_scriptpubkey(
@@ -2488,8 +2516,9 @@ void channel_watch_funding(struct lightningd *ld, struct channel *channel)
 					    scriptpubkey, tal_count(scriptpubkey),
 					    get_block_height(ld));
 	} else {
-		/* Funding tx already confirmed: register an outpoint watch so
-		 * bwatch tells us when it is spent (fires channel_funding_spent_watch_found). */
+		/* Funding tx confirmed (or SCB stub with known outpoint): watch for spend.
+		 * Stubs skip the scriptpubkey path above because remote_fundingkey is a
+		 * placeholder and the P2WSH would be wrong; the outpoint is sufficient. */
 		log_debug(channel->log,
 			  "bwatch: adding outpoint watch for funding %s:%u (dbid %"PRIu64")",
 			  fmt_bitcoin_txid(tmpctx, &channel->funding.txid),
@@ -2620,7 +2649,7 @@ void channel_funding_watch_found(struct lightningd *ld,
 		return;
 	}
 
-	if (channel->scid) {
+	if (channel->scid && !is_stub_scid(*channel->scid)) {
 		/* Rescan: we already processed this confirmation on a previous
 		 * run.  channel_watch_funding registered the outpoint watch
 		 * on startup, so nothing more to do. */
@@ -2653,72 +2682,14 @@ void channel_funding_watch_found(struct lightningd *ld,
 				  blockheight);
 }
 
-/* Revert handler for "channel/funding/<dbid>": the confirming block was reorged away.
- * Undoes everything channel_funding_watch_found set up, then handles the
- * reorg according to channel state (mirrors Rusty's funding_reorged_cb). */
-void channel_funding_watch_revert(struct lightningd *ld,
-				  const char *suffix,
-				  u32 blockheight)
+/* Revert handler for "channel/funding/<dbid>" (scriptpubkey watch).
+ * No-op: channel_funding_depth_revert owns all funding-reorg logic.
+ * Either it already ran (clearing scid), or the channel is still
+ * AWAITING_LOCKIN with no confirmed state to roll back. */
+void channel_funding_watch_revert(struct lightningd *ld UNUSED,
+				  const char *suffix UNUSED,
+				  u32 blockheight UNUSED)
 {
-	u64 dbid = strtoull(suffix, NULL, 10);
-	struct channel *channel = channel_by_dbid(ld, dbid);
-
-	if (!channel) {
-		log_debug(ld->log,
-			  "channel/funding revert: unknown dbid %"PRIu64", ignoring",
-			  dbid);
-		return;
-	}
-
-	if (!channel->scid) {
-		/* Already unconfirmed — nothing to do. */
-		return;
-	}
-
-	log_unusual(channel->log,
-		    "Funding tx REORG from depth %u (state %s)",
-		    channel->depth, channel_state_name(channel));
-
-	channel->depth = 0;
-
-	/* Remove the watches installed by channel_funding_watch_found. */
-	watchman_unwatch_blockdepth(ld,
-				    owner_channel_funding_depth(tmpctx, dbid),
-				    blockheight);
-	watchman_unwatch_outpoint(ld,
-				  owner_channel_funding_spent(tmpctx, dbid),
-				  &channel->funding);
-
-	/* Undo wallet_annotate_txout and wallet_transaction_add. */
-	wallet_del_txout_annotation(ld->wallet, &channel->funding);
-	wallet_del_tx_if_unreferenced(ld->wallet, &channel->funding.txid);
-
-	/* Clear the scid. */
-	channel_set_scid(channel, NULL);
-	wallet_channel_save(ld->wallet, channel);
-
-	/* A reorg during AWAITING_LOCKIN is unusual but recoverable; the
-	 * scriptpubkey watch will re-fire if the tx is re-mined.
-	 * For states beyond lock-in, this is more serious. */
-	switch (channel->state) {
-	case CHANNELD_AWAITING_LOCKIN:
-		return;
-	case CHANNELD_NORMAL:
-	case CHANNELD_AWAITING_SPLICE:
-		/* If we opened it or it's zero-conf, fail transiently and
-		 * let the user reconnect once the funding confirms again. */
-		if (channel->opener == LOCAL || channel->minimum_depth == 0) {
-			channel_fail_transient(channel, true,
-					       "Funding tx reorganized out at block %u",
-					       blockheight);
-			return;
-		}
-		/* fall through */
-	default:
-		channel_internal_error(channel,
-				       "Funding tx reorged out in unexpected state %s",
-				       channel_state_name(channel));
-	}
 }
 
 void channel_funding_spent_watch_found(struct lightningd *ld,
@@ -3327,7 +3298,8 @@ static struct command_result *json_getinfo(struct command *cmd,
 	if (!cmd->ld->bitcoind->synced)
 		json_add_string(response, "warning_bitcoind_sync",
 				"Bitcoind is not up-to-date with network.");
-	else if (!cmd->ld->bitcoind->synced)
+	else if (cmd->ld->watchman->last_processed_height <
+		 cmd->ld->watchman->bitcoind_blockcount)
 		json_add_string(response, "warning_lightningd_sync",
 				"Still loading latest blocks from bitcoind.");
 
@@ -4143,15 +4115,79 @@ void channel_funding_depth_found(struct lightningd *ld,
 	}
 }
 
-/* Reorg: remove the depth watch.  The scriptpubkey watch stays live so
- * channel_funding_watch_found re-fires if the tx is re-mined. */
+/* Reorg: the block that confirmed the funding tx was reorged away.
+ * Roll back depth/scid/watches and fail the channel transiently so
+ * channeld reconnects once the tx is re-mined.  The scriptpubkey watch
+ * stays live so channel_funding_watch_found re-fires if the tx is
+ * re-confirmed (possibly at a different block height). */
 void channel_funding_depth_revert(struct lightningd *ld,
 				  const char *suffix,
 				  u32 blockheight)
 {
 	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+
+	if (!channel) {
+		log_debug(ld->log,
+			  "channel/funding_depth revert: unknown dbid %"PRIu64", ignoring",
+			  dbid);
+		/* Still remove the watch to avoid stale entries. */
+		watchman_unwatch_blockdepth(ld,
+					    owner_channel_funding_depth(tmpctx, dbid),
+					    blockheight);
+		return;
+	}
+
+	if (!channel->scid || is_stub_scid(*channel->scid)) {
+		/* Already unconfirmed or stub — nothing to revert. */
+		return;
+	}
+
+	log_unusual(channel->log,
+		    "Funding tx REORG from depth %u (state %s)",
+		    channel->depth, channel_state_name(channel));
+
+	channel->depth = 0;
+
+	/* Remove the watches installed by channel_funding_watch_found. */
 	watchman_unwatch_blockdepth(ld,
 				    owner_channel_funding_depth(tmpctx, dbid),
 				    blockheight);
+	watchman_unwatch_outpoint(ld,
+				  owner_channel_funding_spent(tmpctx, dbid),
+				  &channel->funding);
+
+	/* Undo wallet_annotate_txout and wallet_transaction_add. */
+	wallet_del_txout_annotation(ld->wallet, &channel->funding);
+	wallet_del_tx_if_unreferenced(ld->wallet, &channel->funding.txid);
+
+	/* Clear the scid and reset gossip state before saving (wallet_channel_save
+	 * calls channel_gossip_update, which would attempt an illegal backward
+	 * state transition without this reset). */
+	channel_set_scid(channel, NULL);
+	channel_gossip_funding_reorg(channel);
+	wallet_channel_save(ld->wallet, channel);
+
+	/* A reorg during AWAITING_LOCKIN is unusual but recoverable; the
+	 * scriptpubkey watch will re-fire if the tx is re-mined.
+	 * For states beyond lock-in, this is more serious. */
+	switch (channel->state) {
+	case CHANNELD_AWAITING_LOCKIN:
+		return;
+	case CHANNELD_NORMAL:
+	case CHANNELD_AWAITING_SPLICE:
+		if (channel->opener == LOCAL || channel->minimum_depth == 0) {
+			channel_fail_transient(channel, true,
+					       "Funding tx %s reorganized out, but %s...",
+					       fmt_bitcoin_txid(tmpctx, &channel->funding.txid),
+					       channel->opener == LOCAL ? "we opened it" : "zeroconf anyway");
+			return;
+		}
+		/* fall through */
+	default:
+		channel_internal_error(channel,
+				       "Funding transaction has been reorged out in state %s",
+				       channel_state_name(channel));
+	}
 }
 

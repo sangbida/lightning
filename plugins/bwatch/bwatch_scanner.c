@@ -37,7 +37,8 @@ static void check_scriptpubkey_watches(struct command *cmd,
 		w = scriptpubkey_watches_get(bwatch->scriptpubkey_watches, &k);
 		if (!w)
 			continue;
-		if (blockheight < w->start_block) {
+		if (w->start_block != UINT32_MAX
+		    && blockheight < w->start_block) {
 			plugin_log(cmd->plugin, LOG_BROKEN,
 				   "Watch for script %s on height >= %u found on block %u???",
 				   tal_hexstr(tmpctx, k.script, k.len),
@@ -66,7 +67,8 @@ static void check_outpoint_watches(struct command *cmd,
 		w = outpoint_watches_get(bwatch->outpoint_watches, &outpoint);
 		if (!w)
 			continue;
-		if (blockheight < w->start_block) {
+		if (w->start_block != UINT32_MAX
+		    && blockheight < w->start_block) {
 			plugin_log(cmd->plugin, LOG_BROKEN,
 				   "Watch for outpoint %s on height >= %u found on block %u???",
 				   fmt_bitcoin_outpoint(tmpctx, &outpoint),
