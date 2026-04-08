@@ -90,8 +90,6 @@ static struct command_result *poll_finished(struct command *cmd)
 {
 	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 
-	plugin_log(cmd->plugin, LOG_DBG, "Rescheduling poll timer (current_height=%u)",
-		   bwatch->current_height);
 	bwatch->poll_timer = global_timer(cmd->plugin, time_from_msec(bwatch->poll_interval_ms),
 					   bwatch_poll_chain, NULL);
 	return timer_complete(cmd);
@@ -190,17 +188,20 @@ void bwatch_remove_tip(struct command *cmd, struct bwatch *bwatch)
 		assert(newtip->height == bwatch->current_height - 1);
 		bwatch->current_height = newtip->height;
 		bwatch->current_blockhash = newtip->hash;
+
+		/* Tell watchman the tip rolled back so it persists the new height+hash.
+		 * If we crash before the ack, watchman's stale height > bwatch's height
+		 * on restart, which naturally retriggers the rollback via getwatchmanheight. */
+		bwatch_send_revert_block_processed(cmd, bwatch->current_height,
+						   &bwatch->current_blockhash);
 	} else {
-		/* Back to genesis */
+		/* History exhausted: we've rolled back past everything we stored.
+		 * Set current_height to 0 so getwatchmanheight_done can reset it to
+		 * watchman_height.  Don't notify watchman — it already knows its own
+		 * height and we're about to resume from there via sequential polling. */
 		bwatch->current_height = 0;
 		memset(&bwatch->current_blockhash, 0, sizeof(bwatch->current_blockhash));
 	}
-
-	/* Tell watchman the tip rolled back so it persists the new height+hash.
-	 * If we crash before the ack, watchman's stale height > bwatch's height
-	 * on restart, which naturally retriggers the rollback via getwatchmanheight. */
-	bwatch_send_revert_block_processed(cmd, bwatch->current_height,
-					   &bwatch->current_blockhash);
 }
 
 /* Process or initialize from a block */
@@ -224,10 +225,12 @@ static struct command_result *handle_block(struct command *cmd,
 		return poll_finished(cmd);
 	}
 
-	/* If not initializing, validate block continuity */
 	if (!is_init) {
-		/* Unexpected predecessor? Remove tip and use the new chain's hash */
-		if (!bitcoin_blkid_eq(&block->hdr.prev_hash, &bwatch->current_blockhash)) {
+		/* Validate block continuity only when we have history. After an
+		 * undershot rollback, history is empty and current_blockhash is zero,
+		 * so skip the check and trust the chain. */
+		if (tal_count(bwatch->block_history) > 0 &&
+		    !bitcoin_blkid_eq(&block->hdr.prev_hash, &bwatch->current_blockhash)) {
 			plugin_log(cmd->plugin, LOG_INFORM,
 				   "Reorg detected at block %u: expected parent %s, got %s (fetched block hash: %s)",
 				   *block_height,
@@ -327,9 +330,6 @@ struct command_result *bwatch_poll_chain(struct command *cmd, void *unused)
 	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	struct out_req *req;
 
-	plugin_log(cmd->plugin, LOG_DBG, "Polling chain for new blocks (current_height=%u)",
-		   bwatch->current_height);
-
 	req = jsonrpc_request_start(cmd, "getchaininfo",
 				    getchaininfo_done,
 				    getchaininfo_failed,
@@ -362,7 +362,7 @@ static struct command_result *rescan_block_done(struct command *cmd,
 	struct bitcoin_block *block = block_from_response(buf, result, &blockhash);
 
 	if (!block) {
-		plugin_log(cmd->plugin, LOG_BROKEN,
+		plugin_log(cmd->plugin, LOG_UNUSUAL,
 			   "Rescan: Failed to get/parse block %u",
 			   rescan->current_block);
 		return command_fail(cmd, LIGHTNINGD,
