@@ -629,6 +629,7 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 	struct amount_sat amount;
 	struct pubkey *commitment_point;
 	u8 *scriptPubkey;
+	struct lightningd *ld = channel->peer->ld;
 
 	if (!fromwire_onchaind_add_utxo(
 		tmpctx, msg, &outpoint, &commitment_point,
@@ -645,15 +646,33 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 		  fmt_bitcoin_outpoint(tmpctx, &outpoint),
 		  csv_lock);
 
-	watchman_watch_outpoint(channel->peer->ld,
+	/* Store in our_outputs with close_info so the HSM can derive the key
+	 * and sign a sweep transaction when needed. */
+	wallet_add_onchaind_utxo(ld->wallet,
+				 &outpoint,
+				 blockheight,
+				 scriptPubkey, tal_bytelen(scriptPubkey),
+				 amount,
+				 channel->dbid,
+				 &channel->peer->id,
+				 commitment_point,
+				 csv_lock);
+
+	/* Watch for onchaind's benefit (channel resolution tracking). */
+	watchman_watch_outpoint(ld,
 				owner_onchaind_outpoint(tmpctx, channel->dbid),
+				&outpoint, blockheight);
+
+	/* Watch so the wallet marks the UTXO spent when swept. */
+	watchman_watch_outpoint(ld,
+				owner_wallet_utxo(tmpctx, &outpoint),
 				&outpoint, blockheight);
 
 	mvt = new_coin_wallet_deposit(msg, &outpoint, blockheight,
 			              amount, mk_mvt_tags(MVT_DEPOSIT));
 	mvt->originating_acct = new_mvt_account_id(mvt, channel, NULL);
 
-	wallet_save_chain_mvt(channel->peer->ld, mvt);
+	wallet_save_chain_mvt(ld, mvt);
 }
 
 static void onchain_annotate_txout(struct channel *channel, const u8 *msg)

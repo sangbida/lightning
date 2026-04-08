@@ -1890,6 +1890,25 @@ void wallet_add_our_output(struct wallet *w,
 			   u32 keyindex);
 
 /**
+ * wallet_add_onchaind_utxo - Insert an onchaind-tracked to_remote UTXO.
+ *
+ * Stores the output with close_info so it can later be signed by the HSM.
+ * commitment_point is NULL for option_static_remotekey channels.
+ * csv is 0 for non-anchor channels, 1 for anchor channels.
+ * Caller must register both an onchaind/outpoint/ watch (for channel
+ * resolution tracking) and a wallet/utxo/ watch (to mark spent).
+ */
+void wallet_add_onchaind_utxo(struct wallet *w,
+			      const struct bitcoin_outpoint *outpoint,
+			      u32 blockheight,
+			      const u8 *script, size_t script_len,
+			      struct amount_sat sat,
+			      u64 channel_dbid,
+			      const struct node_id *peer_id,
+			      const struct pubkey *commitment_point,
+			      u32 csv);
+
+/**
  * wallet_watch_p2wpkh - Handler for P2WPKH scriptpubkey watch_found notifications
  * Owner prefix: "wallet/p2wpkh/<keyindex>"
  */
