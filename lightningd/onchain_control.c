@@ -27,7 +27,8 @@
 /* Per-session per-channel tx tracking for onchaind.
  * Stores {txid, confirm_height, num_outputs} for each tx onchaind is watching:
  *  - blockheight: for depth = current_height - blockheight + 1 per block
- *  - num_outputs: to unwatch each output if onchaind loses interest
+ *  - num_outputs: to enumerate outputs for unwatch in unwatch_entry /
+ *    handle_irrevocably_resolved
  */
 struct onchaind_watched_tx {
 	u32 blockheight;
@@ -236,38 +237,17 @@ static void bwatch_register_tx(struct channel *channel,
 }
 
 static void onchaind_spent_reply(struct subd *onchaind, const u8 *msg,
-				 const int *fds,
-				 struct bitcoin_txid *txid)
+				 const int *fds UNUSED,
+				 struct bitcoin_txid *txid UNUSED)
 {
 	bool interested;
 	struct channel *channel = onchaind->channel;
-	struct lightningd *ld = channel->peer->ld;
-	struct onchaind_watched_tx *entry;
 
 	if (!fromwire_onchaind_spent_reply(msg, &interested))
 		channel_internal_error(channel, "Invalid onchaind_spent_reply %s",
 				       tal_hex(tmpctx, msg));
 
 	channel->num_onchain_spent_calls--;
-
-	if (interested)
-		return;
-
-	entry = onchaind_tx_map_get(channel->onchaind_watches, txid);
-	if (!entry) {
-		log_unusual(channel->log, "onchaind_spent_reply: %s not in watch table",
-			    fmt_bitcoin_txid(tmpctx, txid));
-		return;
-	}
-
-	/* Unwatch all outputs from bwatch */
-	struct bitcoin_outpoint outpoint = { .txid = *txid };
-	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid);
-	for (outpoint.n = 0; outpoint.n < entry->num_outputs; outpoint.n++)
-		watchman_unwatch_outpoint(ld, owner_out, &outpoint);
-
-	onchaind_tx_map_delkey(channel->onchaind_watches, txid);
-	tal_free(entry);
 }
 
 /**

@@ -1894,9 +1894,6 @@ void wallet_add_our_output(struct wallet *w,
  *
  * Stores the output with close_info so it can later be signed by the HSM.
  * commitment_point is NULL for option_static_remotekey channels.
- * csv is 0 for non-anchor channels, 1 for anchor channels.
- * Caller must register both an onchaind/outpoint/ watch (for channel
- * resolution tracking) and a wallet/utxo/ watch (to mark spent).
  */
 void wallet_add_onchaind_utxo(struct wallet *w,
 			      const struct bitcoin_outpoint *outpoint,

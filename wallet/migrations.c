@@ -1163,8 +1163,6 @@ static const struct db_migration dbmigrations[] = {
 	 "  spendheight INTEGER,"
 	 "  keyindex INTEGER,"
 	 "  reserved_til INTEGER,"
-	 /* close_info columns: non-NULL for onchaind-tracked to_remote outputs
-	  * that need HSM key derivation via unilateral_close_info. */
 	 "  channel_dbid BIGINT,"
 	 "  peer_id BLOB,"
 	 "  commitment_point BLOB,"

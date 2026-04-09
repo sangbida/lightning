@@ -1856,30 +1856,36 @@ def test_onchaind_replay(node_factory, bitcoind):
     l1.daemon.wait_for_log("closing soon due to the funding outpoint being spent")
     l2.daemon.wait_for_log("closing soon due to the funding outpoint being spent")
 
-    assert len(l1.db_query("SELECT * FROM our_channel_txs;")) > 0
-    assert len(l2.db_query("SELECT * FROM our_channel_txs;")) > 0
+    # The onchaind/channel_close blockdepth watch persists in bwatch's
+    # datastore — this is what allows onchaind to be restarted after a crash.
+    assert len(l1.rpc.listdatastore(['bwatch', 'blockdepth'])['datastore']) > 0
+    assert len(l2.rpc.listdatastore(['bwatch', 'blockdepth'])['datastore']) > 0
 
-    # Generate some blocks so we restart the onchaind from DB (we rescan
-    # last_height - 100)
+    # Generate some blocks to advance the chain before restarting.
     bitcoind.generate_block(100)
     sync_blockheight(bitcoind, [l1, l2])
 
     # l1 should still have the persisted funding-spend record for restart.
-    assert len(l1.db_query("SELECT * FROM our_channel_txs;")) > 0
+    assert len(l1.rpc.listdatastore(['bwatch', 'blockdepth'])['datastore']) > 0
 
     l2.rpc.stop()
     l1.restart()
 
-    # Can't wait for it, it's after the "Server started" wait in restart()
-    assert l1.daemon.is_in_log(r'Restarting onchaind \(ONCHAIN\): closed in block 109')
+    # Mine one block so bwatch processes it and fires the onchaind/channel_close
+    # blockdepth watch, triggering onchaind restart.
+    bitcoind.generate_block(1)
+    sync_blockheight(bitcoind, [l1])
+    l1.daemon.wait_for_log(r'Restarting onchaind after crash \(channel_close watch fired\)')
 
-    # l1 should still notice that the funding was spent and that we should react to it
-    _, txid, blocks = l1.wait_for_onchaind_tx('OUR_DELAYED_RETURN_TO_WALLET',
-                                              'OUR_UNILATERAL/DELAYED_OUTPUT_TO_US')
-    assert blocks == 200
-
-    # We already mined 100
+    # Mine enough blocks to satisfy the to_self_delay (201) so onchaind can
+    # create and broadcast the sweep tx.  We already mined 101 blocks after
+    # the commitment (100 pre-restart + 1 post-restart), so 100 more suffice.
     bitcoind.generate_block(100)
+    sync_blockheight(bitcoind, [l1])
+
+    # l1 should still notice that the funding was spent and react to it.
+    _, txid, _ = l1.wait_for_onchaind_tx('OUR_DELAYED_RETURN_TO_WALLET',
+                                         'OUR_UNILATERAL/DELAYED_OUTPUT_TO_US')
     # Could be RBF!
     l1.mine_txid_or_rbf(txid)
 
