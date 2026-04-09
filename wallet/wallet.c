@@ -299,7 +299,8 @@ static struct utxo *onchaind_output_row_to_utxo(const tal_t *ctx,
 	db_col_node_id(stmt, "peer_id", &ci->peer_id);
 	ci->commitment_point = db_col_optional(ci, stmt, "commitment_point", pubkey);
 	ci->csv = db_col_int(stmt, "csv");
-	ci->option_anchors = (ci->csv > 0);
+	size_t script_len = tal_bytelen(utxo->scriptPubkey);
+	ci->option_anchors = is_p2wsh(utxo->scriptPubkey, script_len, NULL);
 
 	utxo->keyindex = 0;
 	utxo->close_info = ci;

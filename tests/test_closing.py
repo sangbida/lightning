@@ -1803,26 +1803,14 @@ def test_onchain_unwatch(node_factory, bitcoind, chainparams):
     l1.daemon.wait_for_log('Resolved OUR_UNILATERAL/DELAYED_OUTPUT_TO_US by our proposal '
                            'OUR_DELAYED_RETURN_TO_WALLET')
 
-    # Now test unrelated onchain churn.
-    # Daemon gets told about wallet; says it doesn't care.
-    l1.rpc.withdraw(l1.rpc.newaddr('bech32')['bech32'], 'all')
-    bitcoind.generate_block(1)
 
-    l1.daemon.wait_for_log("but we don't care")
-
-    # And lightningd should respect that!
-    assert not l1.daemon.is_in_log("Can't unwatch txid")
-
-    # So these should not generate further messages
     for i in range(5):
         l1.rpc.withdraw(l1.rpc.newaddr('bech32')['bech32'], 'all')
         bitcoind.generate_block(1)
         # Make sure it digests the block
         sync_blockheight(bitcoind, [l1])
 
-    # We won't see this again.
-    assert not l1.daemon.is_in_log("but we don't care",
-                                   start=l1.daemon.logsearch_start)
+    assert not l1.daemon.is_in_log("but we don't care")
 
     assert account_balance(l1, channel_id) == 0
     assert account_balance(l2, channel_id) == 0
@@ -1877,9 +1865,6 @@ def test_onchaind_replay(node_factory, bitcoind):
     sync_blockheight(bitcoind, [l1])
     l1.daemon.wait_for_log(r'Restarting onchaind after crash \(channel_close watch fired\)')
 
-    # Mine enough blocks to satisfy the to_self_delay (201) so onchaind can
-    # create and broadcast the sweep tx.  We already mined 101 blocks after
-    # the commitment (100 pre-restart + 1 post-restart), so 100 more suffice.
     bitcoind.generate_block(100)
     sync_blockheight(bitcoind, [l1])
 

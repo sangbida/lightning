@@ -25,16 +25,17 @@
 #include <onchaind/onchaind_wiregen.h>
 
 /* Per-session per-channel tx tracking for onchaind.
- * Stores {txid, confirm_height, num_outputs} for each tx onchaind is watching:
- *  - blockheight: for depth = current_height - blockheight + 1 per block
- *  - num_outputs: to enumerate outputs for unwatch in unwatch_entry /
- *    handle_irrevocably_resolved
+ * One entry per tx onchaind has asked us to watch.
+ *  - blockheight: confirmation height, used for depth math and blockdepth unwatch
+ *  - txid: the tx whose outputs we are watching
+ *  - outpoints: the specific outputs onchaind requested (not all outputs)
  */
 struct onchaind_watched_tx {
 	u32 blockheight;
-	u32 num_outputs;
 	struct bitcoin_txid txid;
+	struct bitcoin_outpoint *outpoints;
 };
+
 
 static const struct bitcoin_txid *onchaind_watched_tx_keyof(const struct onchaind_watched_tx *entry)
 {
@@ -188,99 +189,89 @@ static void onchain_tx_depth(struct channel *channel,
 }
 
 /**
- * bwatch_register_tx - Track a tx and register its outputs with bwatch.
+ * bwatch_watch_outpoints - Register specific outpoints with bwatch for a tx.
  *
- * Idempotent: skips if already tracked.  Adds the tx to the per-channel
- * hash table (confirm height for depth math; full tx for output enumeration
- * on unwatch), then registers a WATCH_BLOCKDEPTH for depth notifications and a
- * WATCH_OUTPOINT per output so onchaind_output_watch_found fires if/when
- * each output is spent.
+ * Called when onchaind tells us which outputs of a spending tx it cares about.
+ * Idempotent per-tx: creates the map entry and depth watches on the first call,
+ * then appends new outpoint watches on subsequent calls for the same tx.
  */
-static void bwatch_register_tx(struct channel *channel,
-				const struct bitcoin_tx *tx,
-				u32 blockheight)
+static void bwatch_watch_outpoints(struct channel *channel,
+				   const struct bitcoin_txid *txid,
+				   u32 blockheight,
+				   const struct bitcoin_outpoint *outpoints,
+				   size_t num_outpoints)
 {
-	struct bitcoin_outpoint outpoint;
 	struct lightningd *ld = channel->peer->ld;
-	const char *owner_out;
 	struct onchaind_watched_tx *entry;
 
-	bitcoin_txid(tx, &outpoint.txid);
+	entry = onchaind_tx_map_get(channel->onchaind_watches, txid);
+	if (!entry) {
+		entry = tal(channel->onchaind_watches, struct onchaind_watched_tx);
+		entry->txid = *txid;
+		entry->blockheight = blockheight;
+		entry->outpoints = tal_arr(entry, struct bitcoin_outpoint, 0);
+		onchaind_tx_map_add(channel->onchaind_watches, entry);
 
-	if (onchaind_tx_map_get(channel->onchaind_watches, &outpoint.txid))
-		return;
+		/* Single per-tx depth watch; drives both CSV and HTLC maturity
+		 * checks since both just need the tx depth.  Unwatched on reorg
+		 * (revert handler) and on full resolution. */
+		watchman_watch_blockdepth(ld,
+					  owner_onchaind_depth(tmpctx, channel->dbid, txid),
+					  blockheight);
+		onchain_tx_depth(channel, txid, 1);
+	}
 
-	entry = tal(channel->onchaind_watches, struct onchaind_watched_tx);
-	entry->txid = outpoint.txid;
-	entry->blockheight = blockheight;
-	entry->num_outputs = tx->wtx->num_outputs;
-	onchaind_tx_map_add(channel->onchaind_watches, entry);
-
-	owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid);
-
-	for (outpoint.n = 0; outpoint.n < tx->wtx->num_outputs; outpoint.n++)
-		watchman_watch_outpoint(ld, owner_out, &outpoint, blockheight);
-
-	/* Register depth watches so onchaind_csv_depth_found /
-	 * onchaind_htlc_depth_found drive onchaind's maturity checks per block.
-	 * Unwatched on reorg via the revert handlers, and explicitly on
-	 * irrevocable resolution in handle_irrevocably_resolved. */
-	watchman_watch_blockdepth(ld,
-				  owner_onchaind_csv(tmpctx, channel->dbid),
-				  blockheight);
-	watchman_watch_blockdepth(ld,
-				  owner_onchaind_htlc_depth(tmpctx, channel->dbid),
-				  blockheight);
-
-	/* Send the initial depth immediately */
-	onchaind_send_depth_updates(channel, blockheight);
-}
-
-static void onchaind_spent_reply(struct subd *onchaind, const u8 *msg,
-				 const int *fds UNUSED,
-				 struct bitcoin_txid *txid UNUSED)
-{
-	bool interested;
-	struct channel *channel = onchaind->channel;
-
-	if (!fromwire_onchaind_spent_reply(msg, &interested))
-		channel_internal_error(channel, "Invalid onchaind_spent_reply %s",
-				       tal_hex(tmpctx, msg));
-
-	channel->num_onchain_spent_calls--;
+	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid, txid);
+	for (size_t i = 0; i < num_outpoints; i++) {
+		tal_arr_expand(&entry->outpoints, outpoints[i]);
+		watchman_watch_outpoint(ld, owner_out, &outpoints[i], blockheight);
+	}
 }
 
 /**
- * onchain_txo_spent - Notify onchaind that an output was spent.
+ * handle_onchaind_watch_outpoints - onchaind told us which outputs to watch.
  *
- * The caller (onchaind_output_watch_found) is responsible for registering the
- * spending tx with bwatch_register_tx before calling this.
+ * We always register a per-tx depth watch so the "waiting N more blocks"
+ * countdown fires even when the resolution tx has no further outputs to track
+ * (e.g. a sweep straight to the wallet).  Outpoint watches are only added for
+ * the outputs onchaind actually listed.
+ */
+static void handle_onchaind_watch_outpoints(struct channel *channel, const u8 *msg)
+{
+	struct bitcoin_txid txid;
+	u32 blockheight;
+	struct bitcoin_outpoint *outpoints;
+
+	if (!fromwire_onchaind_watch_outpoints(tmpctx, msg, &txid, &blockheight,
+					       &outpoints))
+		channel_internal_error(channel, "Invalid onchaind_watch_outpoints %s",
+				       tal_hex(tmpctx, msg));
+
+	bwatch_watch_outpoints(channel, &txid, blockheight,
+			       outpoints, tal_count(outpoints));
+}
+
+/**
+ * onchain_txo_spent - Notify onchaind that a watched output was spent.
+ *
+ * Sends WIRE_ONCHAIND_SPENT; onchaind will asynchronously reply with
+ * WIRE_ONCHAIND_WATCH_OUTPOINTS listing the outputs (if any) to watch next.
  */
 static void onchain_txo_spent(struct channel *channel,
 			      const struct bitcoin_tx *tx,
 			      size_t input_num,
 			      u32 blockheight)
 {
-	u8 *msg;
-	struct bitcoin_txid *txid;
-	/* Onchaind needs all inputs so it can compare with alternative spends
-	 * (feerate-varied RBF variants). */
 	struct tx_parts *parts = tx_parts_from_wally_tx(tmpctx, tx->wtx, -1, -1);
-
-	/* Reply context carries the txid so onchaind_spent_reply can unwatch. */
-	txid = tal(NULL, struct bitcoin_txid);
-	bitcoin_txid(tx, txid);
-
-	msg = towire_onchaind_spent(channel, parts, input_num, blockheight);
-	subd_req(channel->owner, channel->owner, take(msg), -1, 0,
-		 onchaind_spent_reply, take(txid));
-	channel->num_onchain_spent_calls++;
+	u8 *msg = towire_onchaind_spent(channel, parts, input_num, blockheight);
+	subd_send_msg(channel->owner, take(msg));
 }
 
 /**
  * onchaind_output_watch_found - bwatch handler: a watched output was spent.
  *
- * Owner format: "onchaind/outpoint/<dbid>"
+ * Owner format: "onchaind/outpoint/<dbid>/<txid_hex>"
+ * Notify onchaind; it will tell us which outputs of the spending tx to watch.
  */
 void onchaind_output_watch_found(struct lightningd *ld,
 				 const char *suffix,
@@ -304,64 +295,56 @@ void onchaind_output_watch_found(struct lightningd *ld,
 		return;
 	}
 
-	/* Register the spending tx (and its outputs) so onchaind gets depth
-	 * updates and spend notifications for the whole resolution chain. */
-	bwatch_register_tx(channel, tx, blockheight);
 	onchain_txo_spent(channel, tx, innum, blockheight);
 }
 
-/* Revert for "onchaind/outpoint/<dbid>": an output-spending tx was reorged.
- *
- * onchaind_output_watch_found called bwatch_register_tx(channel, spending_tx, blockheight),
- * which added spending_tx to onchaind_watches and registered WATCH_OUTPOINT for each
- * of its outputs, plus WATCH_BLOCKDEPTH for csv/htlc_depth.  We undo all of that here.
- *
- * Note: the onchaind_spent message already sent to onchaind cannot be recalled.
- * Onchaind is still running; it will eventually see the re-mined block and
- * get the correct depth updates again. */
 /* Forward declaration — defined below alongside the other unwatch helpers. */
 static void unwatch_entry(struct channel *channel,
 			  const struct onchaind_watched_tx *entry);
 
+/**
+ * onchaind_output_watch_revert - bwatch revert: a spend of a watched output was reorged.
+ *
+ * Owner format: "onchaind/outpoint/<dbid>/<txid_hex>" where txid is the tx
+ * whose outputs we were watching.  We look it up directly and unwatch it.
+ *
+ * Note: the WIRE_ONCHAIND_SPENT message already sent cannot be recalled.
+ * Onchaind will see the re-mined block and get correct depth updates again.
+ */
 void onchaind_output_watch_revert(struct lightningd *ld,
 				  const char *suffix,
 				  u32 blockheight)
 {
-	u64 dbid = strtoull(suffix, NULL, 10);
-	struct channel *channel = channel_by_dbid(ld, dbid);
-	struct onchaind_tx_map_iter it;
+	const char *sep = strchr(suffix, '/');
+	struct bitcoin_txid txid;
 	struct onchaind_watched_tx *entry;
-	struct onchaind_watched_tx **to_remove;
 
-	if (!channel) {
-		log_broken(ld->log,
-			   "onchaind/outpoint revert: unknown dbid %"PRIu64", ignoring",
-			   dbid);
+	if (!sep) {
+		log_broken(ld->log, "onchaind/outpoint revert: bad suffix %s", suffix);
 		return;
 	}
 
-	if (!channel->onchaind_watches)
+	u64 dbid = strtoull(suffix, NULL, 10);
+	struct channel *channel = channel_by_dbid(ld, dbid);
+	if (!channel || !channel->onchaind_watches)
 		return;
+
+	if (!hex_decode(sep + 1, strlen(sep + 1), &txid, sizeof(txid))) {
+		log_broken(ld->log,
+			   "onchaind/outpoint revert: bad txid in suffix %s", suffix);
+		return;
+	}
+
+	entry = onchaind_tx_map_get(channel->onchaind_watches, &txid);
+	if (!entry)
+		return; /* already reverted or was never interesting */
 
 	log_unusual(channel->log,
 		    "onchaind-tracked output spend reorged out at block %u", blockheight);
 
-	to_remove = tal_arr(tmpctx, struct onchaind_watched_tx *, 0);
-
-	/* Collect entries registered at this blockheight (the reorged spending tx). */
-	for (entry = onchaind_tx_map_first(channel->onchaind_watches, &it);
-	     entry;
-	     entry = onchaind_tx_map_next(channel->onchaind_watches, &it)) {
-		if (entry->blockheight != blockheight)
-			continue;
-		unwatch_entry(channel, entry);
-		tal_arr_expand(&to_remove, entry);
-	}
-
-	for (size_t i = 0; i < tal_count(to_remove); i++) {
-		onchaind_tx_map_delkey(channel->onchaind_watches, &to_remove[i]->txid);
-		tal_free(to_remove[i]);
-	}
+	unwatch_entry(channel, entry);
+	onchaind_tx_map_delkey(channel->onchaind_watches, &txid);
+	tal_free(entry);
 }
 
 /**
@@ -495,25 +478,21 @@ static void handle_onchain_htlc_timeout(struct channel *channel, const u8 *msg)
 	onchain_failed_our_htlc(channel, &htlc, "timed out", true);
 }
 
-/* Remove all bwatch watches for one entry: outpoints on its outputs and the
- * csv/htlc_depth blockdepth watch at its confirm height.
+/* Remove all bwatch watches for one entry: the specific outpoints onchaind
+ * requested and the per-tx csv/htlc_depth blockdepth watches.
  * Does not remove the entry from the hash table. */
 static void unwatch_entry(struct channel *channel,
 			  const struct onchaind_watched_tx *entry)
 {
 	struct lightningd *ld = channel->peer->ld;
-	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid);
-	struct bitcoin_outpoint outpoint;
+	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid,
+							&entry->txid);
 
-	outpoint.txid = entry->txid;
-	for (outpoint.n = 0; outpoint.n < entry->num_outputs; outpoint.n++)
-		watchman_unwatch_outpoint(ld, owner_out, &outpoint);
+	for (size_t i = 0; i < tal_count(entry->outpoints); i++)
+		watchman_unwatch_outpoint(ld, owner_out, &entry->outpoints[i]);
 
 	watchman_unwatch_blockdepth(ld,
-				    owner_onchaind_csv(tmpctx, channel->dbid),
-				    entry->blockheight);
-	watchman_unwatch_blockdepth(ld,
-				    owner_onchaind_htlc_depth(tmpctx, channel->dbid),
+				    owner_onchaind_depth(tmpctx, channel->dbid, &entry->txid),
 				    entry->blockheight);
 }
 
@@ -640,7 +619,8 @@ static void onchain_add_utxo(struct channel *channel, const u8 *msg)
 
 	/* Watch for onchaind's benefit (channel resolution tracking). */
 	watchman_watch_outpoint(ld,
-				owner_onchaind_outpoint(tmpctx, channel->dbid),
+				owner_onchaind_outpoint(tmpctx, channel->dbid,
+							&outpoint.txid),
 				&outpoint, blockheight);
 
 	/* Watch so the wallet marks the UTXO spent when swept. */
@@ -1773,6 +1753,10 @@ static unsigned int onchain_msg(struct subd *sd, const u8 *msg, const int *fds U
 		handle_onchaind_spend_htlc_expired(sd->channel, msg);
 		break;
 
+	case WIRE_ONCHAIND_WATCH_OUTPOINTS:
+		handle_onchaind_watch_outpoints(sd->channel, msg);
+		break;
+
 	/* We send these, not receive them */
 	case WIRE_ONCHAIND_INIT:
 	case WIRE_ONCHAIND_SPENT:
@@ -1782,7 +1766,6 @@ static unsigned int onchain_msg(struct subd *sd, const u8 *msg, const int *fds U
 	case WIRE_ONCHAIND_SPEND_CREATED:
 	case WIRE_ONCHAIND_DEV_MEMLEAK:
 	case WIRE_ONCHAIND_DEV_MEMLEAK_REPLY:
-	case WIRE_ONCHAIND_SPENT_REPLY:
 		break;
 	}
 
@@ -2046,61 +2029,71 @@ void onchaind_funding_spent(struct channel *channel,
 
 	if (!channel->onchaind_watches)
 		channel->onchaind_watches = new_htable(channel, onchaind_tx_map);
-	bwatch_register_tx(channel, tx, blockheight);
+
+	/* For the commitment tx itself we eagerly watch all outputs, since
+	 * onchaind will spend/resolve each one and will tell us (via
+	 * WIRE_ONCHAIND_WATCH_OUTPOINTS) what to watch from there on. */
+	struct bitcoin_txid txid;
+	struct bitcoin_outpoint *all_outputs;
+
+	bitcoin_txid(tx, &txid);
+	all_outputs = tal_arr(tmpctx, struct bitcoin_outpoint, tx->wtx->num_outputs);
+	for (u32 n = 0; n < tx->wtx->num_outputs; n++) {
+		all_outputs[n].txid = txid;
+		all_outputs[n].n = n;
+	}
+	bwatch_watch_outpoints(channel, &txid, blockheight,
+			       all_outputs, tx->wtx->num_outputs);
 }
 
 /*
- * onchaind/csv/<dbid>  and  onchaind/htlc_depth/<dbid>
+ * onchaind/csv/<dbid>/<txid>  and  onchaind/htlc_depth/<dbid>/<txid>
  *
- * Fire onchaind_send_depth_updates each block so onchaind can check maturity
- * thresholds.  Registered in bwatch_register_tx when a resolution tx confirms;
- * removed on reorg via the revert handlers, and on full resolution in
- * handle_irrevocably_resolved.
+ * Per-tx depth watches so each resolution tx gets independent depth
+ * notifications.  Registered in bwatch_watch_outpoints when a tx is first
+ * tracked; removed on reorg via the revert handlers and on full resolution in
+ * handle_irrevocably_resolved / onchaind_clear_watches.
  */
-void onchaind_csv_depth_found(struct lightningd *ld,
-			      const char *suffix,
-			      u32 depth UNUSED,
-			      u32 blockheight)
+/* Parse "<dbid>/<txid_hex>" from the suffix of onchaind/csv/ and
+ * onchaind/htlc_depth/ depth watch owners. */
+/* onchaind/depth/<dbid>/<txid_hex>: fires each block after a resolution tx
+ * confirms, delivering the tx's depth to onchaind for CSV / HTLC maturity. */
+void onchaind_depth_found(struct lightningd *ld,
+			  const char *suffix,
+			  u32 depth,
+			  u32 blockheight UNUSED)
 {
-	u64 dbid = strtoull(suffix, NULL, 10);
-	struct channel *channel = channel_by_dbid(ld, dbid);
+	const char *sep = strchr(suffix, '/');
+	u64 dbid;
+	struct bitcoin_txid txid;
+	struct channel *channel;
 
+	if (!sep || !hex_decode(sep + 1, strlen(sep + 1), &txid, sizeof(txid))) {
+		log_broken(ld->log, "onchaind/depth bad suffix: %s", suffix);
+		return;
+	}
+	dbid = strtoull(suffix, NULL, 10);
+	channel = channel_by_dbid(ld, dbid);
 	if (!channel || !channel->owner)
 		return;
 
-	onchaind_send_depth_updates(channel, blockheight);
+	onchain_tx_depth(channel, &txid, depth);
 }
 
-void onchaind_csv_depth_revert(struct lightningd *ld,
-			       const char *suffix,
-			       u32 blockheight)
+void onchaind_depth_revert(struct lightningd *ld,
+			   const char *suffix,
+			   u32 blockheight)
 {
-	u64 dbid = strtoull(suffix, NULL, 10);
-	watchman_unwatch_blockdepth(ld,
-				    owner_onchaind_csv(tmpctx, dbid),
-				    blockheight);
-}
+	const char *sep = strchr(suffix, '/');
+	u64 dbid;
+	struct bitcoin_txid txid;
 
-void onchaind_htlc_depth_found(struct lightningd *ld,
-			       const char *suffix,
-			       u32 depth UNUSED,
-			       u32 blockheight)
-{
-	u64 dbid = strtoull(suffix, NULL, 10);
-	struct channel *channel = channel_by_dbid(ld, dbid);
-
-	if (!channel || !channel->owner)
+	if (!sep || !hex_decode(sep + 1, strlen(sep + 1), &txid, sizeof(txid))) {
+		log_broken(ld->log, "onchaind/depth revert bad suffix: %s", suffix);
 		return;
-
-	onchaind_send_depth_updates(channel, blockheight);
-}
-
-void onchaind_htlc_depth_revert(struct lightningd *ld,
-				const char *suffix,
-				u32 blockheight)
-{
-	u64 dbid = strtoull(suffix, NULL, 10);
+	}
+	dbid = strtoull(suffix, NULL, 10);
 	watchman_unwatch_blockdepth(ld,
-				    owner_onchaind_htlc_depth(tmpctx, dbid),
+				    owner_onchaind_depth(tmpctx, dbid, &txid),
 				    blockheight);
 }

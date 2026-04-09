@@ -1175,12 +1175,12 @@ static void onchain_annotate_txin(const struct bitcoin_txid *txid, u32 innum,
  * Return true if it's useful to know about, false to suppress this and any
  * child transactions.
  */
-static bool output_spent(struct tracked_output ***outs,
+static void output_spent(struct tracked_output ***outs,
 			 const struct tx_parts *tx_parts,
 			 u32 input_num,
 			 u32 tx_blockheight)
 {
-	bool interesting = false;
+	bool matched = false;
 
 	for (size_t i = 0; i < tal_count(*outs); i++) {
 		struct tracked_output *out = (*outs)[i];
@@ -1190,7 +1190,7 @@ static bool output_spent(struct tracked_output ***outs,
 					   &out->outpoint))
 			continue;
 
-		interesting = true;
+		matched = true;
 
 		if (out->resolved)
 			continue;
@@ -1320,7 +1320,7 @@ static bool output_spent(struct tracked_output ***outs,
 		}
 	}
 
-	if (!interesting) {
+	if (!matched) {
 		struct bitcoin_txid txid;
 		wally_tx_input_get_txid(tx_parts->inputs[input_num], &txid);
 
@@ -1328,8 +1328,6 @@ static bool output_spent(struct tracked_output ***outs,
 			     fmt_bitcoin_txid(tmpctx, &txid),
 			     tx_parts->inputs[input_num]->index);
 	}
-
-	return interesting;
 }
 
 static void update_resolution_depth(struct tracked_output *out, u32 depth)
@@ -1587,16 +1585,26 @@ static void handle_onchaind_spent(struct tracked_output ***outs, const u8 *msg)
 {
 	struct tx_parts *tx_parts;
 	u32 input_num, tx_blockheight;
-	bool interesting;
+	struct bitcoin_outpoint *outpoints_to_watch;
 
 	if (!fromwire_onchaind_spent(msg, msg, &tx_parts, &input_num,
 				     &tx_blockheight))
 		master_badmsg(WIRE_ONCHAIND_SPENT, msg);
 
-	interesting = output_spent(outs, tx_parts, input_num, tx_blockheight);
+	/* Any new entries appended to *outs by output_spent are outputs of the
+	 * spending tx that need further resolution; tell lightningd to watch them. */
+	size_t num_tracked_before = tal_count(*outs);
+	output_spent(outs, tx_parts, input_num, tx_blockheight);
 
-	/* Tell lightningd if it was interesting */
-	wire_sync_write(REQ_FD, take(towire_onchaind_spent_reply(NULL, interesting)));
+	outpoints_to_watch = tal_arr(tmpctx, struct bitcoin_outpoint, 0);
+	for (size_t i = num_tracked_before; i < tal_count(*outs); i++)
+		tal_arr_expand(&outpoints_to_watch, (*outs)[i]->outpoint);
+
+	wire_sync_write(REQ_FD,
+			take(towire_onchaind_watch_outpoints(NULL,
+							     &tx_parts->txid,
+							     tx_blockheight,
+							     outpoints_to_watch)));
 }
 
 static void handle_onchaind_known_preimage(struct tracked_output ***outs,
@@ -1656,7 +1664,7 @@ static void wait_for_resolved(struct tracked_output **outs)
 
 		/* We send these, not receive! */
 		case WIRE_ONCHAIND_INIT_REPLY:
-		case WIRE_ONCHAIND_SPENT_REPLY:
+		case WIRE_ONCHAIND_WATCH_OUTPOINTS:
 		case WIRE_ONCHAIND_EXTRACTED_PREIMAGE:
 		case WIRE_ONCHAIND_MISSING_HTLC_OUTPUT:
 		case WIRE_ONCHAIND_HTLC_TIMEOUT:

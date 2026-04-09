@@ -181,9 +181,13 @@ static inline const char *owner_channel_funding_spent(const tal_t *ctx, u64 dbid
 static inline const char *owner_channel_wrong_funding_spent(const tal_t *ctx, u64 dbid)
 { return tal_fmt(ctx, "channel/wrong_funding_spent/%"PRIu64, dbid); }
 
-/* onchaind/ owners */
-static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid)
-{ return tal_fmt(ctx, "onchaind/outpoint/%"PRIu64, dbid); }
+/* onchaind/ owners — each tx tracked by onchaind gets its own owner strings,
+ * keyed by the txid of the tx whose outputs are being watched.  This lets
+ * revert handlers and unwatch_entry target a specific tx without iterating. */
+static inline const char *owner_onchaind_outpoint(const tal_t *ctx, u64 dbid,
+						  const struct bitcoin_txid *txid)
+{ return tal_fmt(ctx, "onchaind/outpoint/%"PRIu64"/%s",
+		 dbid, tal_hexstr(ctx, txid, sizeof(*txid))); }
 
 /* gossip/ owners */
 static inline const char *owner_gossip_scid(const tal_t *ctx,
@@ -200,11 +204,10 @@ static inline const char *owner_channel_funding_depth(const tal_t *ctx, u64 dbid
 { return tal_fmt(ctx, "channel/funding_depth/%"PRIu64, dbid); }
 
 
-static inline const char *owner_onchaind_csv(const tal_t *ctx, u64 dbid)
-{ return tal_fmt(ctx, "onchaind/csv/%"PRIu64, dbid); }
-
-static inline const char *owner_onchaind_htlc_depth(const tal_t *ctx, u64 dbid)
-{ return tal_fmt(ctx, "onchaind/htlc_depth/%"PRIu64, dbid); }
+static inline const char *owner_onchaind_depth(const tal_t *ctx, u64 dbid,
+					       const struct bitcoin_txid *txid)
+{ return tal_fmt(ctx, "onchaind/depth/%"PRIu64"/%s",
+		 dbid, tal_hexstr(ctx, txid, sizeof(*txid))); }
 
 /* onchaind/channel_close/<dbid>:<txid_hex>: persistent restart marker for
  * channel closes.  Uses ':' to separate dbid from txid within the suffix,

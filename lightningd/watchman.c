@@ -499,10 +499,8 @@ static const struct depth_dispatch {
 	 * is active.  Serves as the crash-recovery restart marker: if onchaind is not running when
 	 * this fires, the handler looks up the spending tx and re-launches onchaind. */
 	{ "onchaind/channel_close/", onchaind_channel_close_depth_found, onchaind_channel_close_depth_revert },
-	/* onchaind/csv/<dbid>: WATCH_BLOCKDEPTH, fires each block to drive CSV maturity checks in onchaind */
-	{ "onchaind/csv/",          onchaind_csv_depth_found,    onchaind_csv_depth_revert    },
-	/* onchaind/htlc_depth/<dbid>: WATCH_BLOCKDEPTH, fires each block to drive HTLC maturity checks in onchaind */
-	{ "onchaind/htlc_depth/",   onchaind_htlc_depth_found,  onchaind_htlc_depth_revert   },
+	/* onchaind/depth/<dbid>/<txid>: WATCH_BLOCKDEPTH, fires each block to drive CSV and HTLC maturity checks */
+	{ "onchaind/depth/",        onchaind_depth_found,        onchaind_depth_revert        },
 };
 
 static const struct watch_dispatch {
@@ -524,7 +522,7 @@ static const struct watch_dispatch {
 	{ "channel/funding_spent/",       channel_funding_spent_watch_found,       channel_funding_spent_watch_revert       },
 	/* channel/wrong_funding_spent/<dbid>: WATCH_OUTPOINT, fires when shutdown_wrong_funding outpoint is spent */
 	{ "channel/wrong_funding_spent/", channel_wrong_funding_spent_watch_found, channel_wrong_funding_spent_watch_revert },
-	/* onchaind/outpoint/<dbid>: WATCH_OUTPOINT, fires when any onchaind-tracked output is spent */
+	/* onchaind/outpoint/<dbid>/<txid>: WATCH_OUTPOINT, fires when an outpoint onchaind asked us to watch is spent */
 	{ "onchaind/outpoint/",           onchaind_output_watch_found,             onchaind_output_watch_revert             },
 	/* gossip/funding_spent/<scid>: WATCH_OUTPOINT, fires when the confirmed funding output is spent */
 	{ "gossip/funding_spent/",        gossip_funding_spent_watch_found,        gossip_funding_spent_watch_revert        },

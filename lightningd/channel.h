@@ -208,13 +208,9 @@ struct channel {
 	 * the wallet.  NULL when no splice detection is pending. */
 	struct bitcoin_outpoint *pre_splice_funding;
 
-	/* Per-session onchaind tx tracking: txid → {confirm_height, num_outputs}.
-	 * Enables per-block depth updates (onchaind_send_depth_updates) and
-	 * clean unwatch-on-disinterest (onchaind_spent_reply).
+	/* Per-session onchaind tx tracking: txid → {confirm_height, outpoints}.
 	 * Initialised by onchaind_funding_spent; NULL before onchaind starts. */
 	struct onchaind_tx_map *onchaind_watches;
-	/* Number of outstanding onchaind_spent calls */
-	size_t num_onchain_spent_calls;
 
 	/* The txid of the tx that spent our funding output, set by
 	 * onchaind_funding_spent.  Used to build the owner string for the
