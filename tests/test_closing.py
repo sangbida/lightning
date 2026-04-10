@@ -3169,12 +3169,17 @@ def test_permfail(node_factory, bitcoind):
                                               'OUR_UNILATERAL/DELAYED_OUTPUT_TO_US')
     assert blocks == 4
 
-    wait_for(lambda: only_one(l1.rpc.listpeerchannels(l2.info['id'])['channels'])['status']
+    # l1's channeld may have set a permanent billboard ("Received ERROR channel...")
+    # if it processed l2's dev_fail ERROR before the channel moved to ONCHAIN.
+    # Filter to ONCHAIN: entries only to avoid matching against that prior-state entry.
+    wait_for(lambda: [s for s in only_one(l1.rpc.listpeerchannels(l2.info['id'])['channels'])['status']
+                      if s.startswith('ONCHAIN:')]
              == ['ONCHAIN:Tracking their unilateral close',
                  'ONCHAIN:All outputs resolved: waiting 99 more blocks before forgetting channel'])
 
     def check_billboard():
-        billboard = only_one(l2.rpc.listpeerchannels(l1.info['id'])['channels'])['status']
+        billboard = [s for s in only_one(l2.rpc.listpeerchannels(l1.info['id'])['channels'])['status']
+                     if s.startswith('ONCHAIN:')]
         return (
             len(billboard) == 2
             and billboard[0] == 'ONCHAIN:Tracking our own unilateral close'
@@ -3197,10 +3202,10 @@ def test_permfail(node_factory, bitcoind):
     bitcoind.generate_block(95, wait_for_mempool=txid)
     wait_for(lambda: l1.rpc.listpeers()['peers'] == [])
 
-    wait_for(lambda: only_one(l2.rpc.listpeerchannels(l1.info['id'])['channels'])['status'] == [
-        'ONCHAIN:Tracking our own unilateral close',
-        'ONCHAIN:All outputs resolved: waiting 5 more blocks before forgetting channel'
-    ])
+    wait_for(lambda: [s for s in only_one(l2.rpc.listpeerchannels(l1.info['id'])['channels'])['status']
+                      if s.startswith('ONCHAIN:')]
+             == ['ONCHAIN:Tracking our own unilateral close',
+                 'ONCHAIN:All outputs resolved: waiting 5 more blocks before forgetting channel'])
 
     # Now, 100 blocks l2 should be done.
     bitcoind.generate_block(5)
