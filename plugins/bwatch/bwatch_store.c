@@ -530,16 +530,13 @@ struct watch *bwatch_add_watch(struct command *cmd,
 		if (!found_owner)
 			tal_arr_expand(&w->owners, tal_strdup(w->owners, owner_id));
 		bwatch_save_watch_to_datastore(cmd, w);
-		/* Return NULL only if owner was already registered AND start_block
-		 * didn't drop — no new territory to scan, so no rescan needed. */
-		if (found_owner && !lowered) {
-			plugin_log(cmd->plugin, LOG_DBG,
-				   "Owner %s already watching", owner_id);
-			return NULL;
-		}
+		/* Always rescan even if owner is already registered: stateless
+		 * restarters (e.g. onchaind) re-register on startup and need
+		 * missed spend events replayed. */
 		plugin_log(cmd->plugin, LOG_DBG,
 			   found_owner
-			   ? "Owner %s already watching, lowering start_block to %u"
+			   ? (lowered ? "Owner %s already watching, lowering start_block to %u"
+				      : "Owner %s already watching, rescanning for missed events at %u")
 			   : "Owner %s added to existing watch, start_block %u",
 			   owner_id, w->start_block);
 		return w;

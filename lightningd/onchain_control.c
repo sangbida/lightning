@@ -218,7 +218,10 @@ static void bwatch_watch_outpoints(struct channel *channel,
 		watchman_watch_blockdepth(ld,
 					  owner_onchaind_depth(tmpctx, channel->dbid, txid),
 					  blockheight);
-		onchain_tx_depth(channel, txid, 1);
+		/* Send real depth so onchaind can make correct CSV decisions on restart. */
+		u32 cur = get_block_height(ld);
+		u32 depth = cur > blockheight ? cur - blockheight + 1 : 1;
+		onchain_tx_depth(channel, txid, depth);
 	}
 
 	const char *owner_out = owner_onchaind_outpoint(tmpctx, channel->dbid, txid);
