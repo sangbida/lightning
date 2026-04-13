@@ -290,8 +290,8 @@ void onchaind_output_watch_found(struct lightningd *ld,
 	}
 
 	if (!channel->owner) {
-		log_debug(channel->log,
-			  "onchaind/outpoint watch_found: onchaind not running, skipping");
+		log_broken(channel->log,
+			   "onchaind/outpoint watch_found: onchaind not running");
 		return;
 	}
 
@@ -2025,7 +2025,6 @@ void onchaind_funding_spent(struct channel *channel,
 				   channel_has(channel, OPT_ANCHORS_ZERO_FEE_HTLC_TX),
 				  feerate_min(ld, NULL));
 	subd_send_msg(channel->owner, take(msg));
-
 
 	if (!channel->onchaind_watches)
 		channel->onchaind_watches = new_htable(channel, onchaind_tx_map);

@@ -244,9 +244,10 @@ static struct command_result *handle_block(struct command *cmd,
 			return fetch_block_handle(cmd, *block_height, handle_block, block_height);
 		}
 
-		/* Good block, process tx watches then fire blockdepth notifications */
-		bwatch_process_block_txs(cmd, bwatch, block, *block_height, &blockhash, NULL);
+		/* Depth first: restart-marker watches (e.g. onchaind/channel_close)
+		 * start subdaemons before outpoint watches fire for the same block. */
 		bwatch_check_blockdepth_watches(cmd, bwatch, *block_height);
+		bwatch_process_block_txs(cmd, bwatch, block, *block_height, &blockhash, NULL);
 	}
 
 	/* Update state */
