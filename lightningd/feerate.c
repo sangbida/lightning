@@ -3,7 +3,6 @@
 #include <common/features.h>
 #include <common/htlc_tx.h>
 #include <common/json_command.h>
-#include <common/timeout.h>
 #include <lightningd/bitcoind.h>
 #include <lightningd/channel_control.h>
 #include <lightningd/feerate.h>
@@ -138,7 +137,8 @@ static bool different_blockcounts(struct lightningd *ld,
 
 void update_feerates(struct lightningd *ld,
 		     u32 feerate_floor,
-		     const struct feerate_est *rates TAKES)
+		     const struct feerate_est *rates TAKES,
+		     void *unused UNUSED)
 {
 	struct watchman *wm = ld->watchman;
 	struct feerate_est *new_smoothed;
@@ -176,54 +176,6 @@ void update_feerates(struct lightningd *ld,
 		notify_feerate_change(ld);
 }
 
-/*
- * Fee polling: lightningd polls bitcoind for fee estimates every 30 seconds,
- * mirroring what chaintopology used to do. bwatch no longer calls estimatefees;
- * it only reports blockheight via block_processed.
- */
-struct fee_poll {
-	struct lightningd *ld;
-	struct oneshot *timer;
-};
-
-/* Forward declaration */
-static void start_fee_estimate(struct fee_poll *fp);
-
-static void schedule_fee_estimate(struct fee_poll *fp);
-
-static void update_feerates_and_reschedule(struct lightningd *ld,
-					   u32 feerate_floor,
-					   const struct feerate_est *rates,
-					   struct fee_poll *fp)
-{
-	update_feerates(ld, feerate_floor, rates);
-	schedule_fee_estimate(fp);
-}
-
-static void start_fee_estimate(struct fee_poll *fp)
-{
-	fp->timer = NULL;
-	bitcoind_estimate_fees(fp, fp->ld->bitcoind,
-			       update_feerates_and_reschedule, fp);
-}
-
-static void schedule_fee_estimate(struct fee_poll *fp)
-{
-	fp->timer = new_reltimer(fp->ld->timers, fp,
-				 time_from_sec(30),
-				 start_fee_estimate, fp);
-}
-
-/* Called once bwatch/bitcoind are live; kicks off the 30-second fee poll loop */
-void start_fee_polling(struct lightningd *ld)
-{
-	struct fee_poll *fp = tal(ld, struct fee_poll);
-	fp->ld = ld;
-	fp->timer = NULL;
-	ld->fee_poll = fp;
-	/* Do an immediate estimate, then repeat every 30s */
-	start_fee_estimate(fp);
-}
 
 struct rate_conversion {
 	u32 blockcount;

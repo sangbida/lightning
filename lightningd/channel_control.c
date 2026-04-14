@@ -22,6 +22,7 @@
 #include <lightningd/watchman.h>
 #include <lightningd/hsm_control.h>
 #include <lightningd/notification.h>
+#include <lightningd/peer_control.h>
 #include <lightningd/peer_fd.h>
 #include <lightningd/peer_htlcs.h>
 #include <unistd.h>
@@ -181,6 +182,12 @@ void notify_feerate_change(struct lightningd *ld)
 
 	/* FIXME: We choose not to drop to chain if we can't contact
 	 * peer.  We *could* do so, however. */
+
+	/* Retry anchor boost for any commitment tx that skipped it (feerates were 0 on restart). */
+	boost_anchor_on_feerate_change(ld);
+
+	/* RBF existing anchor txs to the new feerate. */
+	rebroadcast_txs(ld);
 }
 
 static struct splice_command *splice_command_for_chan(struct lightningd *ld,

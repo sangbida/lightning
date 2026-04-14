@@ -19,11 +19,11 @@
 /* Callback for watch_found RPC.
  * watch_found notifications are sent on an aux command so they cannot
  * interfere with the poll command lifetime. */
-static struct command_result *watch_found_done(struct command *cmd,
-					       const char *method UNUSED,
-					       const char *buf UNUSED,
-					       const jsmntok_t *result UNUSED,
-					       void *arg UNUSED)
+static struct command_result *notify_ack(struct command *cmd,
+				      const char *method UNUSED,
+				      const char *buf UNUSED,
+				      const jsmntok_t *result UNUSED,
+				      void *arg UNUSED)
 {
 	return aux_command_done(cmd);
 }
@@ -47,7 +47,7 @@ void bwatch_send_watch_found(struct command *cmd,
 	struct out_req *req;
 
 	req = jsonrpc_request_start(aux, "watch_found",
-				    watch_found_done, watch_found_done, NULL);
+				    notify_ack, notify_ack, NULL);
 	/* tx==NULL signals "not found" for WATCH_SCID; omit tx+txindex so
 	 * json_watch_found passes tx=NULL down to the handler. */
 	if (tx) {
@@ -76,7 +76,7 @@ void bwatch_send_blockdepth_found(struct command *cmd,
 	struct out_req *req;
 
 	req = jsonrpc_request_start(aux, "watch_found",
-				    watch_found_done, watch_found_done, NULL);
+				    notify_ack, notify_ack, NULL);
 	json_add_u32(req->js, "blockheight", blockheight);
 	json_add_u32(req->js, "depth", depth);
 
@@ -96,7 +96,7 @@ void bwatch_send_watch_revert(struct command *cmd,
 	struct out_req *req;
 
 	req = jsonrpc_request_start(aux, "watch_revert",
-				    watch_found_done, watch_found_done, NULL);
+				    notify_ack, notify_ack, NULL);
 	json_add_string(req->js, "owner", owner);
 	json_add_u32(req->js, "blockheight", blockheight);
 	send_outreq(req);
@@ -155,8 +155,25 @@ static struct command_result *block_processed_err(struct command *cmd,
 	return timer_complete(cmd);
 }
 
+/* --- Fee estimation ---
+ * Called from the no-new-blocks path of getchaininfo_done (i.e. at the tip),
+ * so it is naturally skipped during rapid IBD/catch-up block processing.
+ * Sends a bare trigger to lightningd, which calls estimatefees itself via its
+ * existing bitcoind_estimate_fees() infrastructure. */
+
+/* Notify lightningd to refresh its fee estimates. */
+void bwatch_maybe_estimate_fees(struct command *cmd, u32 block_height)
+{
+	struct command *aux = aux_command(cmd);
+	struct out_req *req;
+
+	plugin_log(cmd->plugin, LOG_DBG, "Requesting fee estimate at block %u", block_height);
+	req = jsonrpc_request_start(aux, "feerates_needed",
+				    notify_ack, notify_ack, NULL);
+	send_outreq(req);
+}
+
 /* Send block_processed to watchman with just the blockheight.
- * Fee estimates are now polled independently by lightningd every 30s.
  * The next poll is started from block_processed_ack, ensuring watchman's
  * height is updated before we log "No block change". */
 struct command_result *bwatch_send_block_processed(struct command *cmd)
@@ -183,7 +200,7 @@ void bwatch_send_revert_block_processed(struct command *cmd, u32 new_height,
 	struct out_req *req;
 
 	req = jsonrpc_request_start(aux, "revert_block_processed",
-				    watch_found_done, watch_found_done, NULL);
+				    notify_ack, notify_ack, NULL);
 	json_add_u32(req->js, "blockheight", new_height);
 	json_add_string(req->js, "blockhash",
 			fmt_bitcoin_blkid(tmpctx, new_hash));

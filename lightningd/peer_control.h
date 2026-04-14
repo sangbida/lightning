@@ -129,6 +129,9 @@ void drop_to_chain(struct lightningd *ld, struct channel *channel,
 		   bool cooperative,
 		   const struct bitcoin_tx *unilateral_tx);
 
+/* Re-evaluate anchor boost for commitment txs when feerates change. */
+void boost_anchor_on_feerate_change(struct lightningd *ld);
+
 void update_channel_from_inflight(struct lightningd *ld,
 				  struct channel *channel,
 				  const struct channel_inflight *inflight,

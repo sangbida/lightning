@@ -1,0 +1,398 @@
+diff --git a/hsmd/hsmd.c b/hsmd/hsmd.c
+index 739a148bd..0bb0078cf 100644
+--- a/hsmd/hsmd.c
++++ b/hsmd/hsmd.c
+@@ -800,6 +800,7 @@ static struct io_plan *handle_client(struct io_conn *conn, struct client *c)
+ 	case WIRE_HSMD_SIGN_ANY_PENALTY_TO_US:
+ 	case WIRE_HSMD_SIGN_ANY_DELAYED_PAYMENT_TO_US:
+ 	case WIRE_HSMD_SIGN_ANY_REMOTE_HTLC_TO_US:
++	case WIRE_HSMD_SIGN_ANY_REMOTE_COMMITMENT_TO_US:
+ 	case WIRE_HSMD_SIGN_ANY_LOCAL_HTLC_TX:
+ 	case WIRE_HSMD_SIGN_ANCHORSPEND:
+ 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE:
+diff --git a/hsmd/hsmd_wire.csv b/hsmd/hsmd_wire.csv
+index d3ee517b8..61ec0a905 100644
+--- a/hsmd/hsmd_wire.csv
++++ b/hsmd/hsmd_wire.csv
+@@ -504,6 +504,18 @@ msgdata,hsmd_sign_any_local_htlc_tx,input,u32,
+ msgdata,hsmd_sign_any_local_htlc_tx,peerid,node_id,
+ msgdata,hsmd_sign_any_local_htlc_tx,channel_dbid,u64,
+ 
++# lightningd sweeps to_remote from their unilateral close into our wallet.
++# per_commit_point is NULL for option_static_remotekey channels.
++# wscript is the witness script for P2WSH (anchor) or empty for P2WPKH.
++msgtype,hsmd_sign_any_remote_commitment_to_us,153
++msgdata,hsmd_sign_any_remote_commitment_to_us,per_commit_point,?pubkey,
++msgdata,hsmd_sign_any_remote_commitment_to_us,tx,bitcoin_tx,
++msgdata,hsmd_sign_any_remote_commitment_to_us,wscript_len,u16,
++msgdata,hsmd_sign_any_remote_commitment_to_us,wscript,u8,wscript_len
++msgdata,hsmd_sign_any_remote_commitment_to_us,input,u32,
++msgdata,hsmd_sign_any_remote_commitment_to_us,peerid,node_id,
++msgdata,hsmd_sign_any_remote_commitment_to_us,channel_dbid,u64,
++
+ msgtype,hsmd_sign_htlc_tx_mingle,149
+ msgdata,hsmd_sign_htlc_tx_mingle,peerid,node_id,
+ msgdata,hsmd_sign_htlc_tx_mingle,channel_dbid,u64,
+diff --git a/hsmd/libhsmd.c b/hsmd/libhsmd.c
+index f8d35a044..e3fc552ce 100644
+--- a/hsmd/libhsmd.c
++++ b/hsmd/libhsmd.c
+@@ -162,6 +162,7 @@ bool hsmd_check_client_capabilities(struct hsmd_client *client,
+ 	case WIRE_HSMD_SIGN_ANY_PENALTY_TO_US:
+ 	case WIRE_HSMD_SIGN_ANY_DELAYED_PAYMENT_TO_US:
+ 	case WIRE_HSMD_SIGN_ANY_REMOTE_HTLC_TO_US:
++	case WIRE_HSMD_SIGN_ANY_REMOTE_COMMITMENT_TO_US:
+ 	case WIRE_HSMD_SIGN_ANY_LOCAL_HTLC_TX:
+ 	case WIRE_HSMD_SIGN_ANCHORSPEND:
+ 	case WIRE_HSMD_SIGN_HTLC_TX_MINGLE:
+@@ -2088,6 +2089,49 @@ static u8 *handle_sign_any_remote_htlc_to_us(struct hsmd_client *c,
+ 					 option_anchor_outputs);
+ }
+ 
++/*~ When their commitment transaction is onchain, we have a to_remote output
++ * paying to us.  lightningd creates a sweep transaction to move these funds
++ * to a normal wallet address (signed here) so the wallet doesn't need to
++ * know about special channel key derivation. */
++static u8 *handle_sign_any_remote_commitment_to_us(struct hsmd_client *c,
++						   const u8 *msg_in)
++{
++	struct pubkey *per_commit_point;
++	struct bitcoin_tx *tx;
++	u8 *wscript;
++	struct node_id peer_id;
++	u64 channel_dbid;
++	u32 input_num;
++	struct secret channel_seed;
++	struct basepoints basepoints;
++	struct secrets secrets;
++	struct privkey privkey;
++
++	if (!fromwire_hsmd_sign_any_remote_commitment_to_us(
++		tmpctx, msg_in, &per_commit_point, &tx, &wscript,
++		&input_num, &peer_id, &channel_dbid))
++		return hsmd_status_malformed_request(c, msg_in);
++
++	tx->chainparams = c->chainparams;
++	get_channel_seed(&peer_id, channel_dbid, &channel_seed);
++	derive_basepoints(&channel_seed, NULL, &basepoints, &secrets, NULL);
++
++	/* NULL per_commit_point means option_static_remotekey: the
++	 * remotepubkey is simply our payment_basepoint. */
++	if (!per_commit_point) {
++		privkey.secret = secrets.payment_basepoint_secret;
++	} else if (!derive_simple_privkey(&secrets.payment_basepoint_secret,
++					  &basepoints.payment,
++					  per_commit_point,
++					  &privkey)) {
++		return hsmd_status_bad_request(c, msg_in,
++					       "Failed deriving remote commitment privkey");
++	}
++
++	return handle_sign_to_us_tx(c, msg_in, input_num, tx, &privkey,
++				    wscript, SIGHASH_ALL);
++}
++
+ /*~ When we send a commitment transaction onchain (unilateral close), there's
+  * a delay before we can spend it.  onchaind does an explicit transaction to
+  * transfer it to the wallet so that doesn't need to remember how to spend
+@@ -2301,6 +2345,8 @@ u8 *hsmd_handle_client_message(const tal_t *ctx, struct hsmd_client *client,
+ 		return handle_sign_any_delayed_payment_to_us(client, msg);
+ 	case WIRE_HSMD_SIGN_ANY_REMOTE_HTLC_TO_US:
+ 		return handle_sign_any_remote_htlc_to_us(client, msg);
++	case WIRE_HSMD_SIGN_ANY_REMOTE_COMMITMENT_TO_US:
++		return handle_sign_any_remote_commitment_to_us(client, msg);
+ 	case WIRE_HSMD_SIGN_ANY_LOCAL_HTLC_TX:
+ 		return handle_sign_any_local_htlc_tx(client, msg);
+ 	case WIRE_HSMD_SIGN_ANY_PENALTY_TO_US:
+@@ -2433,6 +2479,7 @@ u8 *hsmd_init(const u8 *secret_data, size_t secret_len, const u64 hsmd_version,
+ 		WIRE_HSMD_CHECK_PUBKEY,
+ 		WIRE_HSMD_CHECK_BIP86_PUBKEY,
+ 		WIRE_HSMD_SIGN_ANY_DELAYED_PAYMENT_TO_US,
++		WIRE_HSMD_SIGN_ANY_REMOTE_COMMITMENT_TO_US,
+ 		WIRE_HSMD_SIGN_ANCHORSPEND,
+ 		WIRE_HSMD_SIGN_HTLC_TX_MINGLE,
+ 		WIRE_HSMD_SIGN_SPLICE_TX,
+diff --git a/lightningd/onchain_control.c b/lightningd/onchain_control.c
+index e097b6be3..7a24db8e0 100644
+--- a/lightningd/onchain_control.c
++++ b/lightningd/onchain_control.c
+@@ -696,6 +696,9 @@ struct onchain_signing_info {
+ 	u8 *wscript;
+ 	/* Trailing element for witness stack */
+ 	const tal_t *stack_elem;
++	/* If true, witness is [sig, wscript] with no intermediate element
++	 * (e.g. to_remote P2WSH: <pubkey> OP_CHECKSIGVERIFY <1> OP_CSV) */
++	bool sig_and_wscript_only;
+ 
+ 	/* Information for consider_onchain_rebroadcast */
+ 	struct amount_sat fee;
+@@ -741,6 +744,11 @@ struct onchain_signing_info {
+ 		struct {
+ 			struct pubkey remote_per_commitment_point;
+ 		} htlc_expired;
++		/* WIRE_ONCHAIND_SPEND_REMOTE_COMMITMENT */
++		struct {
++			/* NULL for option_static_remotekey channels */
++			struct pubkey *per_commit_point;
++		} remote_commitment;
+ 	} u;
+ };
+ 
+@@ -802,6 +810,7 @@ static struct onchain_signing_info *new_signing_info(const tal_t *ctx,
+ 	struct onchain_signing_info *info = tal(ctx, struct onchain_signing_info);
+ 	info->channel = channel;
+ 	info->msgtype = msgtype;
++	info->sig_and_wscript_only = false;
+ 	return info;
+ }
+ 
+@@ -895,6 +904,19 @@ static u8 *sign_htlc_expired(const tal_t *ctx,
+ 						      info->channel->dbid);
+ }
+ 
++static u8 *sign_remote_commitment_to_us(const tal_t *ctx,
++					const struct bitcoin_tx *tx,
++					const struct onchain_signing_info *info)
++{
++	assert(info->msgtype == WIRE_ONCHAIND_SPEND_REMOTE_COMMITMENT);
++	return towire_hsmd_sign_any_remote_commitment_to_us(ctx,
++						info->u.remote_commitment.per_commit_point,
++						tx, info->wscript,
++						0,
++						&info->channel->peer->id,
++						info->channel->dbid);
++}
++
+ /* Matches bitcoin_witness_sig_and_element! */
+ static const struct onchain_witness_element **
+ onchain_witness_sig_and_element(const tal_t *ctx, u8 **witness)
+@@ -1059,6 +1081,16 @@ static struct bitcoin_tx *onchaind_tx_unsigned(const tal_t *ctx,
+ 	return tx;
+ }
+ 
++/* Local copy of script.c's internal helper. */
++static u8 *onchain_stack_sig(const tal_t *ctx,
++			     const struct bitcoin_signature *sig)
++{
++	u8 der[73];
++	size_t len = signature_to_der(der, sig);
++
++	return tal_dup_arr(ctx, u8, der, len, 0);
++}
++
+ static u8 **sign_and_get_witness(const tal_t *ctx,
+ 				 const struct channel *channel,
+ 				 struct bitcoin_tx *tx,
+@@ -1072,6 +1104,13 @@ static u8 **sign_and_get_witness(const tal_t *ctx,
+ 	if (!fromwire_hsmd_sign_tx_reply(msg, &sig))
+ 		fatal("Reading sign_tx_reply: %s", tal_hex(tmpctx, msg));
+ 
++	if (info->sig_and_wscript_only) {
++		/* 2-item witness: [sig, wscript] — no intermediate element */
++		u8 **witness = tal_arr(ctx, u8 *, 2);
++		witness[0] = onchain_stack_sig(witness, &sig);
++		witness[1] = tal_dup_talarr(witness, u8, info->wscript);
++		return witness;
++	}
+ 	return bitcoin_witness_sig_and_element(ctx, &sig, info->stack_elem,
+ 					       tal_bytelen(info->stack_elem),
+ 					       info->wscript);
+@@ -1424,6 +1463,39 @@ static void handle_onchaind_spend_to_us(struct channel *channel,
+ 			  __func__);
+ }
+ 
++static void handle_onchaind_spend_remote_commitment(struct channel *channel,
++						    const u8 *msg)
++{
++	struct onchain_signing_info *info;
++	struct bitcoin_outpoint out;
++	struct amount_sat out_sats;
++	u32 sequence;
++
++	info = new_signing_info(msg, channel, WIRE_ONCHAIND_SPEND_REMOTE_COMMITMENT);
++	info->stack_elem = NULL;
++	/* to_remote P2WSH witness is just [sig, wscript], no extra element */
++	info->sig_and_wscript_only = true;
++
++	if (!fromwire_onchaind_spend_remote_commitment(info, msg,
++					   &out, &out_sats,
++					   &sequence,
++					   &info->minblock,
++					   &info->u.remote_commitment.per_commit_point,
++					   &info->wscript)) {
++		channel_internal_error(channel,
++				       "Invalid onchaind_spend_remote_commitment %s",
++				       tal_hex(tmpctx, msg));
++		return;
++	}
++
++	info->deadline_block = slow_sweep_deadline(channel->peer->ld, channel);
++
++	create_onchain_tx(channel, &out, out_sats,
++			  sequence, 0,
++			  sign_remote_commitment_to_us, info,
++			  __func__);
++}
++
+ static void handle_onchaind_spend_penalty(struct channel *channel,
+ 					  const u8 *msg)
+ {
+@@ -1774,6 +1846,10 @@ static unsigned int onchain_msg(struct subd *sd, const u8 *msg, const int *fds U
+ 		handle_onchaind_spend_htlc_expired(sd->channel, msg);
+ 		break;
+ 
++	case WIRE_ONCHAIND_SPEND_REMOTE_COMMITMENT:
++		handle_onchaind_spend_remote_commitment(sd->channel, msg);
++		break;
++
+ 	/* We send these, not receive them */
+ 	case WIRE_ONCHAIND_INIT:
+ 	case WIRE_ONCHAIND_SPENT:
+diff --git a/onchaind/onchaind.c b/onchaind/onchaind.c
+index 5f2ad78df..ac040ddcc 100644
+--- a/onchaind/onchaind.c
++++ b/onchaind/onchaind.c
+@@ -1673,6 +1673,7 @@ static void wait_for_resolved(struct tracked_output **outs)
+ 		case WIRE_ONCHAIND_SPEND_HTLC_TIMEOUT:
+ 		case WIRE_ONCHAIND_SPEND_FULFILL:
+ 		case WIRE_ONCHAIND_SPEND_HTLC_EXPIRED:
++		case WIRE_ONCHAIND_SPEND_REMOTE_COMMITMENT:
+ 			break;
+ 		}
+ 		master_badmsg(-1, msg);
+@@ -2550,23 +2551,25 @@ static void tell_wallet_to_remote(const struct tx_parts *tx,
+ }
+ 
+ static void their_unilateral_local(struct tracked_output ***outs,
+-				   const struct tx_parts *tx,
+-				   const struct bitcoin_outpoint *outpoint,
+-				   u32 tx_blockheight,
+-				   struct amount_sat amt,
+-				   const u8 *local_scriptpubkey,
+-				   enum tx_type tx_type,
+-				   u32 csv_lock)
++			   const struct tx_parts *tx,
++			   const struct bitcoin_outpoint *outpoint,
++			   u32 tx_blockheight,
++			   struct amount_sat amt,
++			   const u8 *local_scriptpubkey,
++			   enum tx_type tx_type,
++			   u32 csv_lock)
+ {
+ 	struct tracked_output *out;
+-	/* BOLT #5:
+-	 *
+-	 * - MAY take no action in regard to the associated
+-	 *   `to_remote`, which is simply a P2WPKH output to
+-	 *   the *local node*.
+-	 *   - Note: `to_remote` is considered *resolved* by the
+-	 *     commitment transaction itself.
+-	 */
++	const u8 *wscript = NULL;
++	const struct pubkey *per_commit_point;
++	const u8 *msg;
++
++	/* For anchor channels, to_remote is P2WSH with a CSV lock. */
++	if (option_anchor_outputs || option_anchors_zero_fee_htlc_tx)
++		wscript = bitcoin_wscript_to_remote_anchored(tmpctx,
++							     &keyset->other_payment_key,
++							     csv_lock);
++
+ 	out = new_tracked_output(outs,
+ 				 outpoint,
+ 				 tx_blockheight,
+@@ -2575,14 +2578,23 @@ static void their_unilateral_local(struct tracked_output ***outs,
+ 				 OUTPUT_TO_US,
+ 				 NULL, NULL,
+ 				 NULL);
+-	ignore_output(out);
+-
+-	tell_wallet_to_remote(tx, outpoint,
+-			      tx_blockheight,
+-			      local_scriptpubkey,
+-			      remote_per_commitment_point,
+-			      commit_num >= static_remotekey_start[REMOTE],
+-			      csv_lock);
++
++	/* NULL per_commit_point signals static remotekey: use payment_basepoint directly. */
++	per_commit_point = (commit_num >= static_remotekey_start[REMOTE])
++		? NULL : remote_per_commitment_point;
++
++	/* Ask lightningd to sweep the to_remote output into our wallet.
++	 * This creates a real tx we sign and broadcast, so the swept output
++	 * arrives as a normal wallet UTXO without needing special close_info. */
++	msg = towire_onchaind_spend_remote_commitment(NULL,
++						      outpoint, amt,
++						      csv_lock,
++						      rel_blockheight(out, csv_lock),
++						      per_commit_point,
++						      wscript);
++	propose_resolution_to_master(out, take(msg),
++				     rel_blockheight(out, csv_lock),
++				     OUR_DELAYED_RETURN_TO_WALLET);
+ }
+ 
+ 
+diff --git a/onchaind/onchaind_wire.csv b/onchaind/onchaind_wire.csv
+index 3c9c76bba..827ab3036 100644
+--- a/onchaind/onchaind_wire.csv
++++ b/onchaind/onchaind_wire.csv
+@@ -198,6 +198,18 @@ msgdata,onchaind_spend_htlc_expired,remote_per_commitment_point,pubkey,
+ msgdata,onchaind_spend_htlc_expired,wscript_len,u32,
+ msgdata,onchaind_spend_htlc_expired,wscript,u8,wscript_len
+ 
++# We tell lightningd to sweep the to_remote output from their unilateral close:
++# per_commit_point is NULL if option_static_remotekey applies.
++# wscript is set for anchor channels (P2WSH), empty for non-anchor (P2WPKH).
++msgtype,onchaind_spend_remote_commitment,5046
++msgdata,onchaind_spend_remote_commitment,outpoint,bitcoin_outpoint,
++msgdata,onchaind_spend_remote_commitment,outpoint_amount,amount_sat,
++msgdata,onchaind_spend_remote_commitment,sequence,u32,
++msgdata,onchaind_spend_remote_commitment,minblock,u32,
++msgdata,onchaind_spend_remote_commitment,per_commit_point,?pubkey,
++msgdata,onchaind_spend_remote_commitment,wscript_len,u32,
++msgdata,onchaind_spend_remote_commitment,wscript,u8,wscript_len
++
+ subtype,onchain_witness_element
+ subtypedata,onchain_witness_element,is_signature,bool,
+ subtypedata,onchain_witness_element,len,u32,
+diff --git a/tests/test_misc.py b/tests/test_misc.py
+index 8740558c6..6aaef7c12 100644
+--- a/tests/test_misc.py
++++ b/tests/test_misc.py
+@@ -1462,9 +1462,9 @@ def test_funding_reorg_private(node_factory, bitcoind):
+     bitcoind.generate_block(1)                      # height 109 (to reach minimum_depth=2 again)
+     l1.start()
+ 
+-    # l2 was running, sees last stale block being removed
++    # l2 was running, sees last stale block being removed and funding reorged
+     l2.daemon.wait_for_logs([r'Removing stale block {}'.format(106),
+-                             r'Got depth change .->{} for .* REORG'.format(0)])
++                             r'Funding tx REORG from depth'])
+ 
+     # New one should replace old.
+     wait_for(lambda: l2.is_local_channel_active('108x1x0'))
+@@ -3148,10 +3148,13 @@ def test_emergencyrecover(node_factory, bitcoind):
+     sync_blockheight(bitcoind, [l1, l2])
+ 
+     l1.daemon.wait_for_log(r'All outputs resolved.*')
+-    # Make sure l1 can spend its recovered funds.
++    # Make sure both peers are onchain first.
+     wait_for(lambda: l1.rpc.listfunds()["channels"][0]["state"] == "ONCHAIN")
+     wait_for(lambda: l2.rpc.listfunds()["channels"][0]["state"] == "ONCHAIN")
+ 
++    # Confirm sweep txs and wait for wallet outputs to appear.
++    bitcoind.generate_block(1, wait_for_mempool=1)
++    wait_for(lambda: len(l1.rpc.listfunds()["outputs"]) > 0)
+     withdraw = l1.rpc.withdraw(l2.rpc.newaddr('bech32')['bech32'], 'all')
+     # Should have two inputs
+     assert len(bitcoind.rpc.decoderawtransaction(withdraw['tx'])['vin']) == 2
+@@ -4115,7 +4118,7 @@ def test_datastoreusage(node_factory):
+     # check really deep data
+     l1.rpc.datastore(key=["a", "d", "e", "f", "g"], string=data)
+     assert l1.rpc.datastoreusage(key=["a", "d", "e", "f", "g"]) == {'datastoreusage': {'key': '[a,d,e,f,g]', 'total_bytes': (29 + 1 + 1 + 1 + 1 + 1 + 4)}}
+-    assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': (29 + 1 + 1 + 1 + 1 + 1 + 4 + 218)}}
++    assert l1.rpc.datastoreusage(key="a") == {'datastoreusage': {'key': '[a]', 'total_bytes': (29 + 1 + 1 + 1 + 1 + 1 + 4 + 141)}}
+ 
+ 
+ @unittest.skipIf(os.getenv('TEST_DB_PROVIDER', 'sqlite3') != 'sqlite3',

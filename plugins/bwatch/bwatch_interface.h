@@ -23,7 +23,8 @@ void bwatch_send_watch_revert(struct command *cmd,
 			      u32 blockheight);
 
 
-/* Send block_processed notification to watchman (fetches feerates first) */
+/* Notify lightningd to refresh fee estimates (fires only at chain tip). */
+void bwatch_maybe_estimate_fees(struct command *cmd, u32 block_height);
 
 /* Send chaininfo (chain name, IBD status, sync) to watchman; timer callback */
 struct command_result *bwatch_send_chaininfo(struct command *cmd, void *unused UNUSED);

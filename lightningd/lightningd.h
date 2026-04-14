@@ -13,7 +13,6 @@
 
 struct amount_msat;
 struct bitcoind;
-struct fee_poll;
 struct outgoing_tx_map;
 struct watchman;
 
@@ -231,9 +230,6 @@ struct lightningd {
 	/* Bitcoin transactions we're broadcasting */
 	struct outgoing_tx_map *outgoing_txs;
 	struct oneshot *rebroadcast_timer;
-
-	/* Fee polling state (polls bitcoind every 30s for fee estimates) */
-	struct fee_poll *fee_poll;
 
 	/* Blockheight (as acknowledged by gossipd) */
 	u32 gossip_blockheight;

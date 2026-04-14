@@ -493,8 +493,9 @@ static struct bitcoin_tx *spend_anchor(const tal_t *ctx,
 	/* Higher enough than previous to be valid RBF?
 	 * We assume 1 sat per vbyte as minrelayfee */
 	if (!amount_sat_sub(&diff, psbt_fee, anch->anchor_spend_fee)
-	    || amount_sat_less(diff, amount_sat(psbt_weight / 4)))
+	    || amount_sat_less(diff, amount_sat(psbt_weight / 4))) {
 		return NULL;
+	}
 
 	log_debug(channel->log,
 		  "Anchorspend for %s commit tx fee %s (w=%zu), commit_tx fee %s (w=%u):"

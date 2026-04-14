@@ -295,6 +295,19 @@ static bool commit_tx_send_finished(struct channel *channel,
 	return false;
 }
 
+/* When feerates update after restart, re-evaluate anchor boost for any
+ * commitment txs in outgoing_txs that previously avoided it (target was 0). */
+void boost_anchor_on_feerate_change(struct lightningd *ld)
+{
+	struct outgoing_tx *otx;
+	struct outgoing_tx_map_iter it;
+	for (otx = outgoing_tx_map_first(ld->outgoing_txs, &it); otx;
+	     otx = outgoing_tx_map_next(ld->outgoing_txs, &it)) {
+		if ((void *)otx->finished == (void *)commit_tx_send_finished && otx->cbarg)
+			commit_tx_boost(otx->channel, otx->cbarg, true);
+	}
+}
+
 static struct bitcoin_tx *sign_and_send_last(const tal_t *ctx,
 					     struct lightningd *ld,
 					     struct channel *channel,

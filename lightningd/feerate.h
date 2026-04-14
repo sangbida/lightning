@@ -72,13 +72,11 @@ u32 penalty_feerate(struct lightningd *ld);
 /* Usually we set nLocktime to tip (or recent) like bitcoind does */
 u32 default_locktime(struct lightningd *ld);
 
-/* Apply new feerates (called from watchman when block_processed arrives) */
+/* Apply new feerates. Signature matches bitcoind_estimate_fees_() callback. */
 void update_feerates(struct lightningd *ld,
 		     u32 feerate_floor,
-		     const struct feerate_est *rates TAKES);
-
-/* Start polling bitcoind for fee estimates every 30s (replaces chaintopology polling) */
-void start_fee_polling(struct lightningd *ld);
+		     const struct feerate_est *rates TAKES,
+		     void *unused UNUSED);
 
 /* In channel_control.c */
 void notify_feerate_change(struct lightningd *ld);
