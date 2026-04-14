@@ -403,6 +403,7 @@ struct channel *new_unsaved_channel(struct peer *peer,
 	channel->closer = NUM_SIDES;
 	channel->close_attempt_height = 0;
 	channel->close_blockheight = NULL;
+	channel->funding_spend_txid = NULL;
 	/* In case someone looks at channels before open negotiation,
 	 * initialize this with default */
 	channel->type = desired_channel_type(channel,
@@ -710,6 +711,7 @@ struct channel *new_channel(struct peer *peer, u64 dbid,
 	channel->closer = closer;
 	channel->close_attempt_height = close_attempt_height;
 	channel->close_blockheight = NULL;
+	channel->funding_spend_txid = NULL;
 	channel->state_change_cause = reason;
 	channel->ignore_fee_limits = ignore_fee_limits;
 	channel->last_stable_connection = last_stable_connection;
