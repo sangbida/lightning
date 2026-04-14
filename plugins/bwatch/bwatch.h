@@ -54,11 +54,8 @@ struct bwatch {
 	struct blockdepth_watches *blockdepth_watches;
 
 	/* Polling */
-	u32 poll_interval_ms;  
+	u32 poll_interval_ms;  /* Milliseconds between chain polls */
 	struct plugin_timer *poll_timer;
-
-	bool initial_fees_sent;	/* one-shot startup estimate before first block */
-	u32 tip_height;		/* latest chain tip from getchaininfo */
 };
 
 /* Rescan state for catching up on historical blocks */

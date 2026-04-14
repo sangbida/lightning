@@ -18,7 +18,6 @@
 #include <common/jsonrpc_io.h>
 #include <common/timeout.h>
 #include <lightningd/bitcoind.h>
-#include <lightningd/broadcast.h>
 #include <lightningd/channel.h>
 #include <lightningd/feerate.h>
 #include <lightningd/gossip_control.h>
@@ -730,29 +729,13 @@ static struct command_result *json_revert_block_processed(struct command *cmd,
 	return command_success(cmd, response);
 }
 
-/* bwatch sends this once per new block; update feerates. */
-static struct command_result *json_feerates_needed(struct command *cmd,
-						   const char *buffer UNNEEDED,
-						   const jsmntok_t *obj UNNEEDED,
-						   const jsmntok_t *params)
-{
-	if (!param(cmd, buffer, params, NULL))
-		return command_param_failed();
-
-	if (command_check_only(cmd))
-		return command_check_done(cmd);
-
-	bitcoind_estimate_fees(cmd->ld, cmd->ld->bitcoind, update_feerates, NULL);
-	return command_success(cmd, json_stream_success(cmd));
-}
-
-static const struct json_command feerates_needed_command = {
-	"feerates_needed",
-	json_feerates_needed,
-};
-AUTODATA(json_command, &feerates_needed_command);
-
-/* bwatch finished processing a block; update our tracked height. */
+/**
+ * json_block_processed - RPC handler for block_processed notifications from bwatch
+ *
+ * Called by bwatch after it finishes processing all watches in a block.
+ * We track this height to know where bwatch is in the chain, which helps
+ * during startup/reorg scenarios.
+ */
 static struct command_result *json_block_processed(struct command *cmd,
 						   const char *buffer,
 						   const jsmntok_t *obj UNNEEDED,
@@ -795,7 +778,6 @@ static struct command_result *json_block_processed(struct command *cmd,
 
 	channel_block_processed(wm->ld, *blockheight);
 	notify_new_block(wm->ld);
-	rebroadcast_txs(wm->ld);
 
 	struct json_stream *response = json_stream_success(cmd);
 	json_add_u32(response, "blockheight", *blockheight);

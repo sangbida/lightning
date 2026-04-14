@@ -247,13 +247,6 @@ static struct command_result *handle_block(struct command *cmd,
 		 * start subdaemons before outpoint watches fire for the same block. */
 		bwatch_check_blockdepth_watches(cmd, bwatch, *block_height);
 		bwatch_process_block_txs(cmd, bwatch, block, *block_height, &blockhash, NULL);
-
-		/* Only estimate fees when we reach the tip; skip intermediate
-		 * catch-up blocks to avoid cascading RBF failures. */
-		if (*block_height >= bwatch->tip_height) {
-			bwatch->initial_fees_sent = true;
-			bwatch_maybe_estimate_fees(cmd, *block_height);
-		}
 	}
 
 	/* Update state */
@@ -292,8 +285,7 @@ static struct command_result *getchaininfo_done(struct command *cmd,
 	/* Check if block height changed (or if we need to initialize) */
 	if (blockheight > bwatch->current_height) {
 		u32 *target_height = tal(cmd, u32);
-		bwatch->tip_height = blockheight;
-		
+
 		if (bwatch->current_height == 0) {
 			plugin_log(cmd->plugin, LOG_DBG, "First poll: init at block %u", blockheight);
 			*target_height = blockheight;  /* Jump to tip on first init */
@@ -304,16 +296,8 @@ static struct command_result *getchaininfo_done(struct command *cmd,
 		return fetch_block_handle(cmd, *target_height, handle_block, target_height);
 	}
 
-	/* One-shot startup estimate so lightningd has feerates before any
-	 * channel logic runs; per-block estimates in handle_block take over. */
-	if (!bwatch->initial_fees_sent) {
-		plugin_log(cmd->plugin, LOG_DBG, "No block change at %u, startup fee estimate", bwatch->current_height);
-		bwatch_maybe_estimate_fees(cmd, bwatch->current_height);
-		bwatch->initial_fees_sent = true;
-	} else {
-		plugin_log(cmd->plugin, LOG_DBG, "No block change at %u", bwatch->current_height);
-	}
-
+	/* No change, reschedule at normal interval */
+	plugin_log(cmd->plugin, LOG_DBG, "No block change, current_height remains %u", bwatch->current_height);
 	return poll_finished(cmd);
 }
 

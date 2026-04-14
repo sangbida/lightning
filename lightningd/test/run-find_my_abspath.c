@@ -206,6 +206,9 @@ void setup_peers(struct lightningd *ld UNNEEDED)
 /* Generated stub for shutdown_plugins */
 void shutdown_plugins(struct lightningd *ld UNNEEDED)
 { fprintf(stderr, "shutdown_plugins called!\n"); abort(); }
+/* Generated stub for start_fee_polling */
+void start_fee_polling(struct lightningd *ld UNNEEDED)
+{ fprintf(stderr, "start_fee_polling called!\n"); abort(); }
 /* Generated stub for towire_hsmd_ecdh_req */
 u8 *towire_hsmd_ecdh_req(const tal_t *ctx UNNEEDED, const struct pubkey *point UNNEEDED)
 { fprintf(stderr, "towire_hsmd_ecdh_req called!\n"); abort(); }

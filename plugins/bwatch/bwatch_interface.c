@@ -155,25 +155,8 @@ static struct command_result *block_processed_err(struct command *cmd,
 	return timer_complete(cmd);
 }
 
-/* --- Fee estimation ---
- * Called from the no-new-blocks path of getchaininfo_done (i.e. at the tip),
- * so it is naturally skipped during rapid IBD/catch-up block processing.
- * Sends a bare trigger to lightningd, which calls estimatefees itself via its
- * existing bitcoind_estimate_fees() infrastructure. */
-
-/* Notify lightningd to refresh its fee estimates. */
-void bwatch_maybe_estimate_fees(struct command *cmd, u32 block_height)
-{
-	struct command *aux = aux_command(cmd);
-	struct out_req *req;
-
-	plugin_log(cmd->plugin, LOG_DBG, "Requesting fee estimate at block %u", block_height);
-	req = jsonrpc_request_start(aux, "feerates_needed",
-				    notify_ack, notify_ack, NULL);
-	send_outreq(req);
-}
-
 /* Send block_processed to watchman with just the blockheight.
+ * Fee estimates are now polled independently by lightningd every 30s.
  * The next poll is started from block_processed_ack, ensuring watchman's
  * height is updated before we log "No block change". */
 struct command_result *bwatch_send_block_processed(struct command *cmd)
