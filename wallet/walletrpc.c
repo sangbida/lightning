@@ -130,14 +130,14 @@ bool WARN_UNUSED_RESULT newaddr_inner(struct command *cmd, struct pubkey *pubkey
 	b32script = scriptpubkey_p2wpkh(tmpctx, pubkey);
 	p2tr_script = scriptpubkey_p2tr(tmpctx, pubkey);
 
-	/* Add bwatch watches based on requested address type */
+	/* UINT32_MAX: perennial sentinel — never skip on reorg, never rescan. */
 	if (addrtype & ADDR_BECH32)
 		wallet_add_bwatch_scriptpubkey(cmd->ld, "p2wpkh", keyidx,
-					       get_block_height(cmd->ld),
+					       UINT32_MAX,
 					       b32script, tal_bytelen(b32script));
 	if (addrtype & ADDR_P2TR)
 		wallet_add_bwatch_scriptpubkey(cmd->ld, "p2tr", keyidx,
-					       get_block_height(cmd->ld),
+					       UINT32_MAX,
 					       p2tr_script, tal_bytelen(p2tr_script));
 
 	return true;

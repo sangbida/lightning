@@ -56,10 +56,9 @@ struct bwatch {
 	/* Polling */
 	u32 poll_interval_ms;  
 	struct plugin_timer *poll_timer;
-	
+
 	bool initial_fees_sent;	/* one-shot startup estimate before first block */
-	u32 tip_height;		/* latest chain tip from getchaininfo; fee estimates
-				 * are suppressed for catch-up blocks below this */
+	u32 tip_height;		/* latest chain tip from getchaininfo */
 };
 
 /* Rescan state for catching up on historical blocks */

@@ -388,7 +388,7 @@ static struct command_result *finish_psbt(struct command *cmd,
 		}
 		wallet_add_bwatch_scriptpubkey(cmd->ld,
 					      type == ADDR_BECH32 ? "p2wpkh" : "p2tr",
-					      keyidx, get_block_height(cmd->ld),
+					      keyidx, UINT32_MAX,
 					      scriptpubkey, tal_bytelen(scriptpubkey));
 
 		change_outnum = psbt->num_outputs;
@@ -730,7 +730,7 @@ static struct command_result *json_addpsbtoutput(struct command *cmd,
 		}
 		wallet_add_bwatch_scriptpubkey(cmd->ld,
 					      type == ADDR_BECH32 ? "p2wpkh" : "p2tr",
-					      keyidx, get_block_height(cmd->ld),
+					      keyidx, UINT32_MAX,
 					      scriptpubkey, tal_bytelen(scriptpubkey));
 	}
 

@@ -114,8 +114,7 @@ static void bwatch_notify_reorg_watches(struct command *cmd,
 	for (w = scriptpubkey_watches_first(bwatch->scriptpubkey_watches, &sit);
 	     w;
 	     w = scriptpubkey_watches_next(bwatch->scriptpubkey_watches, &sit)) {
-		if (w->start_block < removed_height)
-			continue;
+		/* Scriptpubkey watches are perennial — never skip on reorg, never rescan. */
 		for (size_t i = 0; i < tal_count(w->owners); i++)
 			tal_arr_expand(&owners, w->owners[i]);
 	}

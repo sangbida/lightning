@@ -3033,8 +3033,9 @@ type_ok:
 		const char *addrtype_str = wallet_addrtype_to_owner_prefix(addrtype);
 
 		assert(addrtype_str);
+		/* UINT32_MAX: perennial sentinel — never skip on reorg, never rescan. */
 		wallet_add_bwatch_scriptpubkey(w->ld, addrtype_str, keyindex,
-					      get_block_height(w->ld),
+					      UINT32_MAX,
 					      txout->script, txout->script_len);
 	}
 
