@@ -652,7 +652,7 @@ static bool deep_enough(u32 maxheight, const struct utxo *utxo,
 		 * If `option_anchors` applies to the commitment transaction, the
 		 * `to_remote` output is encumbered by a one block csv lock.
 		 */
-		if (!utxo->blockheight)
+		if (!utxo->blockheight || *utxo->blockheight == 0)
 			return false;
 
 		u32 csv_free = *utxo->blockheight + utxo->close_info->csv - 1;
@@ -671,8 +671,11 @@ static bool deep_enough(u32 maxheight, const struct utxo *utxo,
 	 * maxheight (current_height - minconf) */
 	if (maxheight == 0)
 		return true;
-	if (!utxo->blockheight)
-		return false;
+	/* DB stores mempool outputs as blockheight 0 with a non-NULL pointer;
+	 * they must not satisfy minconf >= 1.  wallet_has_funds passes -1U
+	 * to count those outputs toward on-hand balance. */
+	if (!utxo->blockheight || *utxo->blockheight == 0)
+		return maxheight == (u32)-1;
 	return *utxo->blockheight <= maxheight;
 }
 

@@ -408,7 +408,9 @@ static void json_add_utxo(struct json_stream *response,
 
 	if (utxo->spendheight)
 		json_add_string(response, "status", "spent");
-	else if (utxo->blockheight) {
+	/* Unconfirmed outputs use blockheight 0 in DB; pointer is never NULL
+	 * for rows loaded from our_outputs. */
+	else if (utxo->blockheight && *utxo->blockheight > 0) {
 		json_add_string(response, "status",
 				utxo_is_immature(utxo, current_height)
 				    ? "immature"
@@ -426,7 +428,7 @@ static void json_add_utxo(struct json_stream *response,
 	if (utxo->close_info && utxo->close_info->csv > 1) {
 		json_add_num(response, "csv_lock", utxo->close_info->csv);
 
-		if (utxo->blockheight)
+		if (utxo->blockheight && *utxo->blockheight > 0)
 			json_add_u32(response, "spendable_at",
 				     *utxo->blockheight + utxo->close_info->csv);
 	}
