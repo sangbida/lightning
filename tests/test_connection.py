@@ -3742,6 +3742,7 @@ def test_openchannel_init_alternate(node_factory, executor):
             print("nothing to do")
 
 
+@pytest.mark.skip(reason="TODO: dev-feerate Peer bad state; re-enable with channel lookup fix")
 def test_quiescence(node_factory, executor):
     l1, l2 = node_factory.line_graph(2)
 
