@@ -718,7 +718,7 @@ static struct command_result *json_revert_block_processed(struct command *cmd,
 	if (!wm)
 		return command_fail(cmd, LIGHTNINGD, "Watchman not initialized");
 
-	log_debug(wm->ld->log, "revert_block_processed: %u -> %u",
+	log_debug(wm->ld->log, "block_reverted: %u -> %u",
 		  wm->last_processed_height, *blockheight);
 	wm->last_processed_height = *blockheight;
 	wm->last_processed_hash = *blockhash;

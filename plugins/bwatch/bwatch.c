@@ -296,7 +296,7 @@ static struct command_result *getchaininfo_done(struct command *cmd,
 		return fetch_block_handle(cmd, *target_height, handle_block, target_height);
 	}
 
-	/* No change, reschedule at normal interval */
+	/* No change (or temporarily shorter chain) — reschedule at normal interval */
 	plugin_log(cmd->plugin, LOG_DBG, "No block change, current_height remains %u", bwatch->current_height);
 	return poll_finished(cmd);
 }
@@ -352,12 +352,11 @@ static struct command_result *rescan_block_done(struct command *cmd,
 	struct bitcoin_block *block = block_from_response(buf, result, &blockhash);
 
 	if (!block) {
-		plugin_log(cmd->plugin, LOG_UNUSUAL,
-			   "Rescan: Failed to get/parse block %u",
+		/* Chain may have rolled back past this height; stop quietly. */
+		plugin_log(cmd->plugin, LOG_DBG,
+			   "Rescan: block %u unavailable (chain rolled back?), stopping",
 			   rescan->current_block);
-		return command_fail(cmd, LIGHTNINGD,
-				    "Rescan failed at block %u",
-				    rescan->current_block);
+		return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 	}
 
 	/* Process block: if rescan->watch is NULL, check all watches; otherwise check only that watch */

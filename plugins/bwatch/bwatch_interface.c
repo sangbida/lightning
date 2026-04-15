@@ -223,6 +223,7 @@ static struct command_result *chaininfo_getchaininfo_done(struct command *cmd,
 							 const jsmntok_t *result,
 							 void *unused UNUSED)
 {
+	struct bwatch *bwatch = bwatch_of(cmd->plugin);
 	struct out_req *req;
 	const char *chain;
 	u32 headercount, blockcount;
@@ -239,6 +240,18 @@ static struct command_result *chaininfo_getchaininfo_done(struct command *cmd,
 		plugin_log(cmd->plugin, LOG_BROKEN,
 			   "getchaininfo parse failed: %s", err);
 		return timer_complete(cmd);
+	}
+
+	/* Startup-only rollback: if bitcoind's chain is shorter than our
+	 * stored tip, peel off stale blocks now.  During normal polling,
+	 * getchaininfo_done leaves a shorter chain alone and waits for
+	 * hash-mismatch reorg detection to handle it in handle_block. */
+	if (blockcount < bwatch->current_height) {
+		plugin_log(cmd->plugin, LOG_INFORM,
+			   "Startup: chain at %u but bwatch at %u; rolling back",
+			   blockcount, bwatch->current_height);
+		while (bwatch->current_height > blockcount && tal_count(bwatch->block_history) > 0)
+			bwatch_remove_tip(cmd, bwatch);
 	}
 
 	req = jsonrpc_request_start(cmd, "chaininfo",
