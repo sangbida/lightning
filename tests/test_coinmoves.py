@@ -26,6 +26,26 @@ def check_sql(node, kind, expected):
                 assert val is None, f"{col['name']} is not None ({row} vs {columns})"
 
 
+def _chain_move_sort_key(m):
+    """Stable ordering when chain_moves rows differ only by insertion order (e.g. change before spend)."""
+    bh = m.get('blockheight')
+    if bh is None:
+        bh = -1
+    return (
+        bh,
+        str(m.get('account_id', '')),
+        m.get('primary_tag') or '',
+        str(m.get('utxo', '')),
+        str(m.get('spending_txid') or ''),
+        m.get('credit_msat', 0),
+        m.get('debit_msat', 0),
+        m.get('output_msat', 0),
+        m.get('output_count') if m.get('output_count') is not None else -1,
+        str(m.get('originating_account') or ''),
+        str(m.get('peer_id') or ''),
+    )
+
+
 def check_moves(moves, expected):
     # Can't predict timestamp
     for m in moves:
@@ -46,14 +66,46 @@ def check_channel_moves(node, expected):
     check_sql(node, "channelmoves", expected)
 
 
+def _check_chain_moves_rpc_order_independent(moves, expected):
+    """Like check_moves for chain moves, but order of rows may vary (wallet deposit/withdraw race)."""
+    for m in moves:
+        m.pop('timestamp', None)
+    for e in expected:
+        e.pop('created_index', None)
+    ms = sorted(moves, key=_chain_move_sort_key)
+    es = sorted(expected, key=_chain_move_sort_key)
+    assert len(ms) == len(es), (ms, es)
+    for act, exp in zip(ms, es):
+        exp['created_index'] = act['created_index']
+        assert act == exp, (act, exp)
+
+
+def _check_sql_chainmoves_by_created_index(node, expected):
+    columns = only_one(node.rpc.listsqlschemas('chainmoves')['schemas'])['columns']
+    for e in expected:
+        ret = node.rpc.sql(
+            f"SELECT * FROM chainmoves WHERE created_index={e['created_index']}"
+        )
+        row = only_one(ret['rows'])
+        assert len(row) == len(columns)
+        for val, col in zip(row, columns):
+            if col['name'] in e:
+                assert val == e[col['name']], (
+                    f"{col['name']} is {val} not {e[col['name']]}: ({row} vs {columns})"
+                )
+            elif col['name'] not in ('rowid', 'timestamp'):
+                assert val is None, f"{col['name']} is not None ({row} vs {columns})"
+
+
 def check_chain_moves(node, expected):
     # If this times out, show the result anyway.
     try:
         wait_for(lambda: len(node.rpc.listchainmoves()['chainmoves']) == len(expected))
     except ValueError:
         print("*** Didn't see enough chainmoves")
-    check_moves(node.rpc.listchainmoves()['chainmoves'], expected)
-    check_sql(node, "chainmoves", expected)
+    moves = node.rpc.listchainmoves()['chainmoves']
+    _check_chain_moves_rpc_order_independent(moves, expected)
+    _check_sql_chainmoves_by_created_index(node, expected)
     # Check extra_tags.
     for e in expected:
         rows = node.rpc.sql(f"SELECT cet.extra_tags FROM chainmoves_extra_tags cet LEFT JOIN chainmoves cm ON cet.row = cm.rowid WHERE cm.created_index={e['created_index']} ORDER BY cm.created_index, cet.arrindex;")['rows']
