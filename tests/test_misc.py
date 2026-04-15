@@ -106,27 +106,27 @@ def test_db_upgrade(node_factory):
 def test_bitcoin_failure(node_factory, bitcoind):
     l1 = node_factory.get_node()
 
-    # Make sure we're not failing it between getblockhash and getblock.
     sync_blockheight(bitcoind, [l1])
 
     def crash_bitcoincli(r):
         return {'error': 'go away'}
 
-    # This is not a JSON-RPC response by purpose
+    # estimatesmartfee is polled by lightningd every 30s.
+    # getblockchaininfo is polled by bwatch (via getchaininfo) every 500ms.
     l1.daemon.rpcproxy.mock_rpc('estimatesmartfee', crash_bitcoincli)
-    l1.daemon.rpcproxy.mock_rpc('getblockhash', crash_bitcoincli)
+    l1.daemon.rpcproxy.mock_rpc('getblockchaininfo', crash_bitcoincli)
 
-    # This should cause both estimatefee and getblockhash fail
+    # Both should fail and be logged.
     l1.daemon.wait_for_logs(['Unable to estimate any fees',
-                             'getblockhash .* exited with status 1'])
+                             'getblockchaininfo exited with status 1'])
 
     # And they should retry!
     l1.daemon.wait_for_logs(['Unable to estimate any fees',
-                             'getblockhash .* exited with status 1'])
+                             'getblockchaininfo exited with status 1'])
 
     # Restore, then it should recover and get blockheight.
     l1.daemon.rpcproxy.mock_rpc('estimatesmartfee', None)
-    l1.daemon.rpcproxy.mock_rpc('getblockhash', None)
+    l1.daemon.rpcproxy.mock_rpc('getblockchaininfo', None)
 
     bitcoind.generate_block(5)
     sync_blockheight(bitcoind, [l1])
