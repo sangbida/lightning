@@ -11,6 +11,7 @@
 #include <ccan/tal/str/str.h>
 #include <common/json_param.h>
 #include <common/json_parse.h>
+#include <common/json_parse_simple.h>
 #include <common/json_stream.h>
 #include <common/memleak.h>
 #include <plugins/bwatch/bwatch_wiregen.h>
@@ -217,7 +218,7 @@ static struct command_result *handle_block(struct command *cmd,
 
 	block = block_from_response(buf, result, &blockhash);
 	if (!block) {
-		plugin_log(cmd->plugin, LOG_BROKEN, "Failed to get/parse block %u: '%.*s'",
+		plugin_log(cmd->plugin, LOG_UNUSUAL, "Failed to get/parse block %u: '%.*s'",
 			   *block_height,
 			   json_tok_full_len(result),
 			   json_tok_full(buf, result));
