@@ -329,6 +329,21 @@ void wallet_add_our_output(struct wallet *w,
 	db_bind_amount_sat(stmt, sat);
 	db_bind_int(stmt, keyindex);
 	db_exec_prepared_v2(take(stmt));
+
+	/* Outputs are often first seen unconfirmed (blockheight=0), then
+	 * seen again once mined. Promote existing rows to the confirmed
+	 * blockheight so coin selection can treat them as spendable. */
+	if (blockheight != 0) {
+		stmt = db_prepare_v2(w->db,
+			SQL("UPDATE our_outputs SET blockheight = ?, txindex = ? "
+			    "WHERE txid = ? AND outnum = ? AND blockheight < ?;"));
+		db_bind_int(stmt, blockheight);
+		db_bind_int(stmt, txindex);
+		db_bind_txid(stmt, &outpoint->txid);
+		db_bind_int(stmt, outpoint->n);
+		db_bind_int(stmt, blockheight);
+		db_exec_prepared_v2(take(stmt));
+	}
 }
 
 void wallet_add_onchaind_utxo(struct wallet *w,
