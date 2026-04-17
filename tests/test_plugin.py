@@ -613,6 +613,8 @@ def test_db_hook(node_factory, executor):
     l1.daemon.wait_for_log('plugin-dblog.py: CREATE TABLE version \\(version INTEGER\\)')
     l1.daemon.wait_for_log("plugin-dblog.py: initialized.* 'startup': True")
 
+    # bwatch may still be replaying block_processed events
+    time.sleep(2)
     l1.stop()
 
     # Databases should be identical.
@@ -639,6 +641,8 @@ def test_db_hook_multiple(node_factory, executor):
     l1.daemon.wait_for_log('plugin-dblog.py: CREATE TABLE version \\(version INTEGER\\)')
     l1.daemon.wait_for_log("plugin-dblog.py: initialized.* 'startup': True")
 
+    # bwatch may still be replaying block_processed events
+    time.sleep(2)
     l1.stop()
 
     # Databases should be identical.
