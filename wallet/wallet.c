@@ -240,12 +240,17 @@ static struct utxo *utxo_from_stmt_base(const tal_t *ctx, struct db_stmt *stmt)
 	db_col_txid(stmt, "txid", &utxo->outpoint.txid);
 	utxo->outpoint.n = db_col_int(stmt, "outnum");
 	utxo->amount = db_col_amount_sat(stmt, "satoshis");
-	utxo->is_in_coinbase = false;
 	utxo->scriptPubkey = db_col_arr(utxo, stmt, "scriptpubkey", u8);
 
 	u32 *bh = tal(utxo, u32);
 	*bh = db_col_int(stmt, "blockheight");
 	utxo->blockheight = bh;
+
+	/* Coinbase is always txindex=0; txindex is NULL for unconfirmed outputs,
+	 * which can never be coinbase. */
+	utxo->is_in_coinbase = *bh > 0
+		&& !db_col_is_null(stmt, "txindex")
+		&& db_col_int(stmt, "txindex") == 0;
 
 	utxo->reserved_til = db_col_is_null(stmt, "reserved_til")
 		? 0 : db_col_int(stmt, "reserved_til");
@@ -264,7 +269,7 @@ static struct utxo *utxo_from_stmt_base(const tal_t *ctx, struct db_stmt *stmt)
 	return utxo;
 }
 
-/* Columns: txid outnum blockheight scriptpubkey satoshis spendheight
+/* Columns: txid outnum blockheight txindex scriptpubkey satoshis spendheight
  *          reserved_til keyindex */
 static struct utxo *hd_output_row_to_utxo(const tal_t *ctx,
 					  struct db_stmt *stmt)
@@ -287,7 +292,7 @@ static struct utxo *hd_output_row_to_utxo(const tal_t *ctx,
 	return utxo;
 }
 
-/* Columns: txid outnum blockheight scriptpubkey satoshis spendheight
+/* Columns: txid outnum blockheight txindex scriptpubkey satoshis spendheight
  *          reserved_til channel_dbid peer_id commitment_point csv */
 static struct utxo *onchaind_output_row_to_utxo(const tal_t *ctx,
 						 struct db_stmt *stmt)
@@ -403,7 +408,7 @@ struct utxo **wallet_get_all_utxos(const tal_t *ctx, struct wallet *w)
 	struct db_stmt *stmt;
 
 	stmt = db_prepare_v2(w->db,
-		SQL("SELECT txid, outnum, blockheight, scriptpubkey,"
+		SQL("SELECT txid, outnum, blockheight, txindex, scriptpubkey,"
 		    "       satoshis, spendheight, reserved_til, keyindex"
 		    " FROM our_outputs"
 		    " WHERE channel_dbid IS NULL;"));
@@ -412,7 +417,7 @@ struct utxo **wallet_get_all_utxos(const tal_t *ctx, struct wallet *w)
 	tal_free(stmt);
 
 	stmt = db_prepare_v2(w->db,
-		SQL("SELECT txid, outnum, blockheight, scriptpubkey,"
+		SQL("SELECT txid, outnum, blockheight, txindex, scriptpubkey,"
 		    "       satoshis, spendheight, reserved_til,"
 		    "       channel_dbid, peer_id, commitment_point, csv"
 		    " FROM our_outputs"
@@ -441,7 +446,7 @@ struct utxo **wallet_get_unspent_utxos(const tal_t *ctx, struct wallet *w)
 	struct db_stmt *stmt;
 
 	stmt = db_prepare_v2(w->db,
-		SQL("SELECT txid, outnum, blockheight, scriptpubkey,"
+		SQL("SELECT txid, outnum, blockheight, txindex, scriptpubkey,"
 		    "       satoshis, spendheight, reserved_til, keyindex"
 		    " FROM our_outputs"
 		    " WHERE channel_dbid IS NULL AND spendheight IS NULL;"));
@@ -450,7 +455,7 @@ struct utxo **wallet_get_unspent_utxos(const tal_t *ctx, struct wallet *w)
 	tal_free(stmt);
 
 	stmt = db_prepare_v2(w->db,
-		SQL("SELECT txid, outnum, blockheight, scriptpubkey,"
+		SQL("SELECT txid, outnum, blockheight, txindex, scriptpubkey,"
 		    "       satoshis, spendheight, reserved_til,"
 		    "       channel_dbid, peer_id, commitment_point, csv"
 		    " FROM our_outputs"
@@ -472,7 +477,7 @@ struct utxo *wallet_utxo_get(const tal_t *ctx, struct wallet *w,
 	struct utxo *utxo;
 
 	stmt = db_prepare_v2(w->db,
-		SQL("SELECT txid, outnum, blockheight, scriptpubkey,"
+		SQL("SELECT txid, outnum, blockheight, txindex, scriptpubkey,"
 		    "       satoshis, spendheight, reserved_til, keyindex"
 		    " FROM our_outputs"
 		    " WHERE txid = ? AND outnum = ? AND channel_dbid IS NULL;"));
@@ -485,7 +490,7 @@ struct utxo *wallet_utxo_get(const tal_t *ctx, struct wallet *w,
 		return utxo;
 
 	stmt = db_prepare_v2(w->db,
-		SQL("SELECT txid, outnum, blockheight, scriptpubkey,"
+		SQL("SELECT txid, outnum, blockheight, txindex, scriptpubkey,"
 		    "       satoshis, spendheight, reserved_til,"
 		    "       channel_dbid, peer_id, commitment_point, csv"
 		    " FROM our_outputs"
