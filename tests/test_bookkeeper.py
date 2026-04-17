@@ -272,12 +272,15 @@ def test_bookkeeping_rbf_withdraw(node_factory, bitcoind):
 
     # make sure no onchain fees are counted for the replaced tx
     fees = find_tags(acct_evs, 'onchain_fee')
-    assert len(fees) > 1
+    assert len(fees) >= 1
     for fee in fees:
         assert fee['txid'] == out2['txid']
 
+    # With bwatch, wallet input spends are only detected at confirmation (not
+    # in the mempool), so maybe_update_onchain_fees runs in a single pass and
+    # produces one fee entry (vs. two with the old chaintopology mempool path).
     fees = find_tags(l1.rpc.bkpr_listincome(consolidate_fees=False)['income_events'], 'onchain_fee')
-    assert len(fees) == 2
+    assert len(fees) >= 1
     fees = find_tags(l1.rpc.bkpr_listincome(consolidate_fees=True)['income_events'], 'onchain_fee')
     assert len(fees) == 1
 
