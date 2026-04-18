@@ -1022,7 +1022,6 @@ void channel_gossip_got_announcement_sigs(struct channel *channel,
 		/* We don't care what they said, but it does prompt our response */
 		goto send_our_sigs;
 	case CGOSSIP_WAITING_FOR_MATCHING_PEER_SIGS:
-	case CGOSSIP_WAITING_FOR_ANNOUNCE_DEPTH:
 		stash_remote_announce_sigs(channel, scid, node_sig, bitcoin_sig);
 		update_gossip_state(channel);
 		/* If the peer is retransmitting sigs (e.g. after a splice scid
@@ -1031,6 +1030,10 @@ void channel_gossip_got_announcement_sigs(struct channel *channel,
 		 * Otherwise the peer stays stuck in WAITING_FOR_MATCHING_PEER_SIGS
 		 * forever, since sent_sigs guards against re-sending. */
 		channel->channel_gossip->sent_sigs = false;
+		goto send_our_sigs;
+	case CGOSSIP_WAITING_FOR_ANNOUNCE_DEPTH:
+		stash_remote_announce_sigs(channel, scid, node_sig, bitcoin_sig);
+		update_gossip_state(channel);
 		goto send_our_sigs;
 	}
 	fatal("Bad channel_gossip_state %u", channel->channel_gossip->state);
