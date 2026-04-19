@@ -1723,9 +1723,9 @@ def test_hsmtool_deterministic_node_ids(node_factory):
     assert normal_node_id == generated_node_id, f"Node IDs don't match: {normal_node_id} != {generated_node_id}"
 
 
-def setup_bip86_node(node_factory, mnemonic="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"):
+def setup_bip86_node(node_factory, mnemonic="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about", options=None):
     """Helper function to set up a node with BIP86 support using a mnemonic-based HSM secret"""
-    l1 = node_factory.get_node(start=False)
+    l1 = node_factory.get_node(start=False, options=options)
 
     # Set up node with a mnemonic HSM secret
     hsm_path = os.path.join(l1.daemon.lightning_dir, TEST_NETWORK, "hsm_secret")
@@ -1933,8 +1933,10 @@ def test_bip86_mnemonic_recovery(node_factory, bitcoind):
     # Wait for funds to be visible
     wait_for(lambda: l1.db_query('SELECT COUNT(*) AS count FROM our_outputs WHERE spendheight IS NULL AND (reserved_til IS NULL OR reserved_til = 0)')[0]['count'] > 0)
 
-    # Create a second node with the same mnemonic
-    l2 = setup_bip86_node(node_factory, mnemonic)
+    # We don't have a default rescan, so we need to set it to 15 to ensure the node rescans the blocks
+    l2 = setup_bip86_node(node_factory, mnemonic, options={'rescan': 15})
+    l2.stop()
+    l2.start()
 
     # Wait for it to sync and see the funds
     wait_for(lambda: l2.db_query('SELECT COUNT(*) AS count FROM our_outputs WHERE spendheight IS NULL AND (reserved_til IS NULL OR reserved_til = 0)')[0]['count'] > 0)

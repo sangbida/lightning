@@ -342,6 +342,18 @@ struct command_result *bwatch_poll_chain(struct command *cmd, void *unused)
  * ============================================================================
  */
 
+/* Finish a rescan chain: RPC commands get a JSON result; aux commands just end. */
+static struct command_result *rescan_complete(struct command *cmd)
+{
+	switch (cmd->type) {
+	case COMMAND_TYPE_NORMAL:
+	case COMMAND_TYPE_HOOK:
+		return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	case COMMAND_TYPE_AUX:
+		return aux_command_done(cmd);
+	}
+}
+
 /* Called when we receive a block during rescan */
 static struct command_result *rescan_block_done(struct command *cmd,
 						const char *method,
@@ -357,7 +369,7 @@ static struct command_result *rescan_block_done(struct command *cmd,
 		plugin_log(cmd->plugin, LOG_DBG,
 			   "Rescan: block %u unavailable (chain rolled back?), stopping",
 			   rescan->current_block);
-		return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+		return rescan_complete(cmd);
 	}
 
 	/* Process block: if rescan->watch is NULL, check all watches; otherwise check only that watch */
@@ -370,7 +382,7 @@ static struct command_result *rescan_block_done(struct command *cmd,
 
 	/* Rescan complete */
 	plugin_log(cmd->plugin, LOG_INFORM, "Rescan complete");
-	return command_success(cmd, json_out_obj(cmd, NULL, NULL));
+	return rescan_complete(cmd);
 }
 
 /* Start scanning historical blocks (exposed for bwatch_interface.c) */
