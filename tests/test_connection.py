@@ -1755,7 +1755,7 @@ def test_funding_external_wallet(node_factory, bitcoind):
     txid = bitcoind.rpc.sendrawtransaction(tx['hex'])
     bitcoind.generate_block(1)
 
-    l1.daemon.wait_for_log(r'Funding tx {} depth 1 of 2'.format(txid))
+    l1.daemon.wait_for_log(r'Funding depth 1 \(')
 
     # Check that tx is broadcast by a third party can be catched.
     # Only when the transaction (broadcast by a third pary) is onchain, we can catch it.

@@ -1745,8 +1745,8 @@ def test_zeroconf_public(bitcoind, node_factory, chainparams):
 
     # Now add 1 confirmation, we should get a `short_channel_id` (block 103)
     bitcoind.generate_block(1)
-    l1.daemon.wait_for_log(r'Funding tx [a-f0-9]{64} depth 1 of 0')
-    l2.daemon.wait_for_log(r'Funding tx [a-f0-9]{64} depth 1 of 0')
+    l1.daemon.wait_for_log(r'Funding depth 1 \(block 103, scid block 103\)')
+    l2.daemon.wait_for_log(r'Funding depth 1 \(block 103, scid block 103\)')
 
     l1chan = only_one(l1.rpc.listpeerchannels()['channels'])
     l2chan = only_one(l2.rpc.listpeerchannels()['channels'])
