@@ -894,6 +894,7 @@ static struct command_result *json_chaininfo(struct command *cmd,
 		if (!cmd->ld->bitcoind->synced)
 			log_info(cmd->ld->log, "Bitcoin backend now synced");
 		cmd->ld->bitcoind->synced = true;
+		notify_new_block(cmd->ld);
 	}
 	
 	cmd->ld->watchman->bitcoind_blockcount = *blockcount;

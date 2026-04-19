@@ -351,7 +351,13 @@ static struct command_result *rescan_complete(struct command *cmd)
 		return command_success(cmd, json_out_obj(cmd, NULL, NULL));
 	case COMMAND_TYPE_AUX:
 		return aux_command_done(cmd);
+	case COMMAND_TYPE_NOTIFICATION:
+	case COMMAND_TYPE_TIMER:
+	case COMMAND_TYPE_CHECK:
+	case COMMAND_TYPE_USAGE_ONLY:
+		break;
 	}
+	abort();
 }
 
 /* Called when we receive a block during rescan */
